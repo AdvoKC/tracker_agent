@@ -223,6 +223,25 @@ Short form: **Discovery → Monitor → Classifier → Verifier → Writer → E
   - The fetch itself crashes: mark the URL `unverifiable` and continue.
 - **Handoff:** groups with `sufficient = true` go to the Writer, along with the citable sources' titles, dates and snippets.
 
+**As built (P4, 2026-11-17):**
+- **Blocked sites.** About half the allowlisted outlets answer 403 or 401 to an honestly identified fetcher (Channels TV, TheCable, Vanguard, Guardian NG, Reuters). Claude's WebFetch is blocked too.
+  - A blocked or paywalled URL is therefore confirmed only when it appears in **raw WebSearch tool results**, which are taken from the CLI's `stream-json` events and are not written by the model.
+  - News URLs reuse the News Scout's grounding. Any other URL gets one search call, cached for `cache_days`, including negative results.
+  - Confirmed and relevant means `verified_partial`. Not confirmed means `unverifiable`.
+- **Required sources per event:**
+  - `new_evidence`: the new update's links;
+  - `status_change` with no new update: the latest update's links;
+  - `new_promise`: its source and write-up links;
+  - `news_update`: the news URL.
+
+  Context sources are the promise's own links, up to `max_context_sources`.
+- **News dates:** a fetched page dated more than `date_tolerance_days` before the News Scout's claimed date is `unverifiable` (`date_mismatch`).
+- **News events:** a `news_update` whose own URL isn't citable becomes `needs_sources` on its own. The rest of the group can still proceed.
+- **Group state** lives in `article_groups`: `queued` → `verified` / `needs_sources`. Per-source verdicts are in `article_group_sources`, and the fetch cache is in `sources`.
+- **SafeFetcher** refuses non-public addresses on every redirect hop (SSRF guard), and caps redirects, time and bytes.
+- **First live result:** the unconfirmable Channels TV "16 Nov" port link was refused. A grounded Channels TV rail story verified as `verified_partial`.
+- **CLI:** `promise-monitor verify [--limit N] [--dry-run]`.
+
 ### 3.5 Writer Agent [LLM]
 
 - **Goal:** draft a neutral 100-word article with embedded markdown links.
@@ -256,6 +275,25 @@ Short form: **Discovery → Monitor → Classifier → Verifier → Writer → E
 - **Outputs:** `articles` row (schema in §4.4) with `state = in_review`, plus a row added to the meter's Sheet tab.
 - **Handoff:** the human coordinator.
 
+**As built (P5, 2026-11-17):**
+- **Deterministic QA** (`domain/qa.py`), run before any LLM review:
+  - **Word count:** anchor text counts, URLs don't. A word is a token containing a letter or digit.
+  - **Headline:** at most 14 words and 120 characters; no `?`, `!` or links.
+  - **Links:** at least 2, every one in the citable set (compared after normalization). The promise page and at least one external source are required. Anchors must be descriptive, and no URL may appear outside a link.
+  - **Status labels:** only the current and old rating may appear, and the current rating must be stated.
+  - **News or evidence-only groups:** wording that implies a rating change is banned ("moved from", "now rated", …).
+  - **Banned terms:** matched as whole words.
+  - **Quotes:** at most 15 words.
+  - **Near-duplicates:** cosine similarity ≥ 0.9 against the same promise's articles from the last 90 days.
+- **LLM editor review** runs only after QA passes, to save usage. It checks neutrality and factual consistency against the writer input.
+- **Loop:** `run_draft_loop` writes, checks, then rewrites using the issues as feedback, at most 3 times. The draft with the fewest issues is kept.
+  - Pass: the article is `in_review`.
+  - No pass after 3 rewrites: the article is `needs_attention`, with `qa_flags`.
+  - The group and its events become `drafted`.
+  - If the LLM is unavailable, the group stays `verified` for the next run.
+- **Audit:** `articles.writer_input` stores exactly what the Writer was given.
+- **CLI:** `promise-monitor write [--limit N] [--dry-run]` and `promise-monitor eval-writer` (the P5 exit check: ≥90% of fixture cases pass within 3 rewrites).
+
 ### 3.7 Publisher Agent
 
 - **Goal:** turn approved drafts into the per-meter HTML reports.
@@ -287,6 +325,7 @@ Short form: **Discovery → Monitor → Classifier → Verifier → Writer → E
   - It also returns relevant non-concrete items, flagged as such, so editors can see what was filtered out.
 - **Code-side gate.** The model is never trusted; every rule is enforced in `agents/news_scout.py`:
   - the promise reference must be one we sent;
+  - **grounding:** the URL must appear in the raw WebSearch tool results of that same call (added in P4, after a live run produced a Channels TV URL that no search could find);
   - the URL must normalize, and its outlet must be on the allowlist (exact domain, subdomain, or `*.gov.ng`);
   - the date must be a full date, after the cutoff, and not in the future;
   - it must be `is_concrete_development` with relevance ≥ 0.75;
@@ -440,6 +479,8 @@ A separate mutable table, `promise_index`, holds each promise's cursor: `latest_
 
 ### 4.4 Article
 
+*As built:* `word_count` has no database CHECK, because `needs_attention` drafts may be out of range. The table also has `writer_input` (JSON, audit). `article_group_id` is UNIQUE and references `article_groups`.
+
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -485,6 +526,17 @@ A separate mutable table, `promise_index`, holds each promise's cursor: `latest_
   - `state` (`accepted` or `rejected`) and `reject_reason`;
   - UNIQUE (`promise_id`, `url`).
 - `news_search_state`: `promise_id`, `last_searched_at`, `last_run_id` (rotation cursor).
+- `news_items` (as built) also has `search_grounded` and `search_title`. The latter is the title from the raw search result.
+- `sources` (as built):
+  - `fetch_status` is one of `ok`, `blocked`, `paywalled`, `broken`, `unsupported`, `unsafe`, `error`;
+  - it also has `search_confirmed`, `search_title`, `search_checked_at` and `error`.
+- `article_groups`:
+  - `group_id`, `meter_id`, `promise_id`;
+  - `state`: `queued`, `verified`, `needs_sources`, `drafted`, `in_review`, `published` or `rejected`;
+  - `sufficient`, `notes`, `verified_at`.
+- `article_group_sources`:
+  - (`group_id`, `source_id`), `role` (`promise_page`, `required` or `context`), `event_id`;
+  - `relevant`, `relevance_confidence`, `reason`, `verdict`, `citable`.
 - `change_events` (as built) adds `news_item_id` (FK) and `evidence_lead` (bool) to §4.3. `change_type` gains `news_update`.
 
 ### 4.6 Google Sheet layout (review queue)
@@ -549,7 +601,7 @@ Admin email on:
 
 ## 6. Writer Agent system prompt
 
-The full, ready-to-paste prompt is in **[`prompts/writer.md`](../prompts/writer.md)**. It is version-controlled, and its SHA-256 is recorded on every `llm_calls` row. Key constraints:
+The full, ready-to-paste prompt is in **[`prompts/writer.md`](../prompts/writer.md)**. Since P5 it uses the system/`---USER---` format and states the exact word-counting rule the code enforces. The Editor's prompt is `prompts/editor.md`. It is version-controlled, and its SHA-256 is recorded on every `llm_calls` row. Key constraints:
 - 100 words (95–105), headline excluded.
 - At least 2 markdown links, using only the URLs provided.
 - Descriptive anchors.
@@ -606,7 +658,7 @@ Each phase ends with passing tests and a short demo. One phase at a time.
 | **P1 – API client + Discovery** | `PromiseTrackerClient` with pydantic models from the saved fixtures, rate limiter and retries; Discovery node; `meters` table | Discovery against the live API lists every known meter; fixture tests cover schema quirks |
 | **P2 – Monitor + snapshots** | normalization, fingerprint/hash, diffing, baseline mode, anomaly guard | 2 runs on unchanged data give 0 diffs; injected fixture changes give the correct `RawDiff`s |
 | **P3 – Classifier + dedupe + News Scout** | rules, edit distance, grouping, `dedupe_key`; LLM adapter (`claude -p`) plus `llm_calls` logging; News Scout (Claude web search, code-side gate, rotation) | Re-running the same diff creates no new event; the cosmetic fixture is filtered out; a live news scan stores audited results ✅ 2026-11-17 |
-| **P4 – Verifier** | link fetch, metadata/date extraction, paywall heuristics, relevance LLM, source cache | Fixture URLs (live, 404, paywall, PDF) get the correct verdicts |
+| **P4 – Verifier** | link fetch, metadata/date extraction, paywall heuristics, relevance LLM, source cache; raw-search grounding for blocked URLs and News Scout results | Fixture URLs (live, 404, paywall, PDF) get the correct verdicts ✅ 2026-11-17 |
 | **P5 – Writer + Editor** | prompts, the deterministic QA suite, the rewrite loop | ≥ 90% of fixture groups pass QA within 3 tries; every QA rule has a unit test |
 | **P6 – Sheets review loop** | gspread sync, coordinators tab, approve/edit/reject/stale handling | An end-to-end test using a test spreadsheet |
 | **P7 – Publisher + Notifier** | Jinja2 site, atomic render, Gmail digests and alerts | `site/` renders; an alert email arrives on an injected failure |
@@ -635,6 +687,8 @@ Each phase ends with passing tests and a short demo. One phase at a time.
 | R-T6 | Operational | A single machine goes down and cron doesn't run | Catch-up is automatic; an admin alert after 2 missed or failed runs (heartbeat check at the start of each run) |
 | R-T7 | Operational | Coordinators ignore the queue | 7-day stale reminder; a pending count in the digest; drafts are never auto-published |
 | R-T9 | Cost | News Scout web searches use subscription quota (about $0.3 equivalent per 10-promise call) | Trimmed CLI calls (~1k-token system prompt), batching, a calls-per-run cap with rotation, `news.enabled` switch; usage is visible in `llm_calls.cost_usd` |
-| R-E5 | Editorial | The News Scout invents or misdates a URL, or uses a partisan source | Allowlist enforced in code; full dates only; audit of `search_queries`; URL verified live by the Verifier (P4) before citation; coordinator approval |
+| R-E5 | Editorial | The News Scout invents or misdates a URL, or uses a partisan source | Allowlist enforced in code; full dates only; **URL must appear in the raw search-tool results** (grounding); audit of `search_queries`; Verifier fetch, date check and relevance; coordinator approval |
+| R-T10 | Technical/Ethical | About half the outlets block our honest User-Agent | Never spoof a browser. Confirm blocked URLs from raw search results and label them `verified_partial` so the coordinator sees it |
+| R-T11 | Security | Fetching untrusted URLs (SSRF) | SafeFetcher: http(s) only, a public-IP check on every redirect hop, byte, time and redirect caps |
 | R-E6 | Editorial | One story produces several near-duplicate articles across promises | Each URL is accepted for one promise only (highest relevance; earlier runs win) |
 | R-T8 | Cost | "Free tools only" | Postgres (local), Sheets, Gmail SMTP, cron, and GitHub Pages are all free; the LLM goes through the existing subscription |

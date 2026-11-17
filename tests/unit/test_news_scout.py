@@ -206,3 +206,24 @@ def test_one_story_is_accepted_for_one_promise_only(baselined: Session, app_cfg:
         baselined, FakeLLM({"search_queries": [], "results": [item("P3", url=url)]}), app_cfg
     )
     assert later.accepted == 0
+
+
+def test_url_not_in_raw_search_results_is_rejected(baselined: Session, app_cfg: AppConfig) -> None:
+    # The model reports a URL that the search tool never returned (an invented link).
+    out = {
+        "search_queries": ["q"],
+        "results": [item()],
+        "__search_hits__": ["https://punchng.com/other"],
+    }
+    res = scout(baselined, FakeLLM(out), app_cfg)
+    assert res.accepted == 0
+    assert res.rejected == {"not_in_search_results": 1}
+    stored = baselined.scalars(select(NewsItem)).one()
+    assert stored.search_grounded is False
+
+
+def test_grounded_item_records_search_title(baselined: Session, app_cfg: AppConfig) -> None:
+    res = scout(baselined, FakeLLM({"search_queries": ["q"], "results": [item()]}), app_cfg)
+    assert res.accepted == 1
+    stored = baselined.scalars(select(NewsItem)).one()
+    assert stored.search_grounded is True and stored.search_title

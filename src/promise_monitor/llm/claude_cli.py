@@ -7,7 +7,10 @@ tokens instead of ~33k with defaults):
 - ``--setting-sources ""``, ``--strict-mcp-config``, ``--disable-slash-commands``: no
   project settings, MCP servers or skills;
 - runs in an empty working directory so no CLAUDE.md is picked up;
-- ``--json-schema`` makes the CLI validate output and return it as ``structured_output``.
+- ``--json-schema`` makes the CLI validate output and return it as ``structured_output``;
+- ``--output-format stream-json --verbose`` so we also get the RAW WebSearch tool results
+  (``tool_use_result`` events). They are produced by the search tool, not written by the
+  model, so code can check that a URL really appeared in search results (grounding).
 ``--bare`` is NOT used: it ignores OAuth logins and requires an API key.
 """
 
@@ -22,7 +25,13 @@ from pathlib import Path
 from typing import Any
 
 from promise_monitor.config import LLMConfig
-from promise_monitor.llm.base import LLMAuthError, LLMError, LLMRequest, LLMResponse
+from promise_monitor.llm.base import (
+    LLMAuthError,
+    LLMError,
+    LLMRequest,
+    LLMResponse,
+    SearchHit,
+)
 from promise_monitor.logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -65,7 +74,8 @@ class ClaudeCLIClient:
             "--disable-slash-commands",
             "--no-session-persistence",
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
             "--json-schema",
             json.dumps(request.schema, separators=(",", ":")),
         ]
@@ -111,12 +121,26 @@ class ClaudeCLIClient:
 
 
 def parse_cli_output(stdout: str, stderr: str, returncode: int, latency_ms: int) -> LLMResponse:
-    try:
-        payload: dict[str, Any] = json.loads(stdout)
-    except json.JSONDecodeError as exc:
+    """Parse ``stream-json`` (one event per line) or a single ``json`` result object."""
+    events: list[dict[str, Any]] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(ev, dict):
+            events.append(ev)
+
+    payload = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    if payload is None and len(events) == 1:
+        payload = events[0]  # plain --output-format json
+    if payload is None:
         detail = (stderr or stdout).strip()[:500]
-        _raise_for_text(detail, f"exit {returncode}, non-JSON output")
-        raise LLMError(f"exit {returncode}, non-JSON output: {detail}") from exc
+        _raise_for_text(detail, f"exit {returncode}, no result event")
+        raise LLMError(f"exit {returncode}, no result event: {detail}")
 
     if payload.get("is_error"):
         _raise_for_text(str(payload.get("result", "")), "claude reported an error")
@@ -138,7 +162,23 @@ def parse_cli_output(stdout: str, stderr: str, returncode: int, latency_ms: int)
             "usage": payload.get("usage"),
             "session_id": payload.get("session_id"),
         },
+        search_hits=tuple(_search_hits(events)),
     )
+
+
+def _search_hits(events: list[dict[str, Any]]) -> list[SearchHit]:
+    hits: list[SearchHit] = []
+    for ev in events:
+        result = ev.get("tool_use_result") if ev.get("type") == "user" else None
+        if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+            continue
+        query = str(result.get("query", ""))
+        for block in result["results"]:
+            items = block.get("content") if isinstance(block, dict) else None
+            for item in items if isinstance(items, list) else []:
+                if isinstance(item, dict) and isinstance(item.get("url"), str):
+                    hits.append(SearchHit(item["url"], str(item.get("title", "")), query))
+    return hits
 
 
 def _raise_for_text(text: str, context: str) -> None:

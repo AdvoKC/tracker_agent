@@ -6,6 +6,9 @@ priority. A batch whose call fails is not marked as searched, so it goes first n
 
 Nothing the model returns is trusted. Each result is checked IN CODE:
 - the promise reference must be one we sent;
+- GROUNDING: the URL must appear in the RAW WebSearch tool results of that same call
+  (``LLMResponse.search_hits``, produced by the search tool, not the model). This stops
+  invented or altered URLs; found live on 2026-11-17 (a non-existent Channels TV link);
 - the URL must be well-formed and on the outlet allowlist (config/news_sources.yaml);
 - ``published_date`` must be a full date, after the promise's cutoff, and not in the future;
 - it must be a concrete development with relevance ≥ ``news.min_relevance``;
@@ -250,7 +253,12 @@ def run_news_scout(
             log.warning("news_scout_call_failed", error=str(exc))
             continue
 
-        _store_results(session, resp.output, refs, run_id, now, cfg, sources, today, result)
+        grounding = {
+            u: h.title for h in resp.search_hits if (u := normalize_url(h.url)) is not None
+        }
+        _store_results(
+            session, resp.output, refs, run_id, now, cfg, sources, today, result, grounding
+        )
         for c in batch:
             state = session.get(NewsSearchState, c.promise_id)
             if state is None:
@@ -285,6 +293,7 @@ def _store_results(
     sources: NewsSourcesConfig,
     today: date,
     result: ScoutResult,
+    grounding: dict[str, str],
 ) -> None:
     raw_results = output.get("results")
     if not isinstance(raw_results, list):
@@ -334,7 +343,11 @@ def _store_results(
             continue  # stored on an earlier run (accepted or rejected): already audited
         known.add((c.promise_id, url))
         published = _parse_date(r.get("published_date"))
-        reason = _reject_reason(r, c, url, published, sources, cfg, today)
+        reason = (
+            "not_in_search_results"
+            if url not in grounding
+            else _reject_reason(r, c, url, published, sources, cfg, today)
+        )
         if reason is None and url in claimed_urls:
             reason = "same_story_other_promise"
         if reason is None and accepted_per_promise[c.promise_id] >= cfg.max_results_per_promise:
@@ -353,6 +366,8 @@ def _store_results(
             development_type=str(r.get("development_type", ""))[:64] or None,
             is_concrete=bool(r.get("is_concrete_development")),
             relevance=float(r.get("relevance", 0) or 0),
+            search_grounded=url in grounding,
+            search_title=grounding.get(url),
             state="rejected" if reason else "accepted",
             reject_reason=reason,
             found_at=now,

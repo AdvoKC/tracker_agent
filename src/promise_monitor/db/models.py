@@ -236,6 +236,8 @@ class NewsItem(Base):
     development_type: Mapped[str | None] = mapped_column(String(64))
     is_concrete: Mapped[bool] = mapped_column(Boolean)
     relevance: Mapped[float] = mapped_column()
+    search_grounded: Mapped[bool] = mapped_column(Boolean, default=False)
+    search_title: Mapped[str | None] = mapped_column(Text)  # title from the RAW search result
     state: Mapped[str] = mapped_column(String(16))
     reject_reason: Mapped[str | None] = mapped_column(String(64))
     found_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -249,3 +251,117 @@ class NewsSearchState(Base):
     promise_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     last_searched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_run_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("runs.run_id"))
+
+
+FETCH_STATUSES = ("ok", "blocked", "paywalled", "broken", "unsupported", "unsafe", "error")
+
+
+class Source(Base):
+    """Fetch cache per normalized URL (PRD §4.5). Relevance is per group, not stored here."""
+
+    __tablename__ = "sources"
+    __table_args__ = (CheckConstraint(_in("fetch_status", FETCH_STATUSES), name="fetch_status"),)
+
+    source_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    url: Mapped[str] = mapped_column(Text, unique=True)
+    final_url: Mapped[str | None] = mapped_column(Text)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    fetch_status: Mapped[str] = mapped_column(String(16))
+    content_type: Mapped[str | None] = mapped_column(String(128))
+    title: Mapped[str | None] = mapped_column(Text)
+    publisher: Mapped[str | None] = mapped_column(String(255))
+    published_date: Mapped[date | None] = mapped_column(Date)
+    snippet: Mapped[str | None] = mapped_column(Text)
+    search_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    search_title: Mapped[str | None] = mapped_column(Text)
+    search_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+GROUP_STATES = (
+    "queued",
+    "verified",
+    "needs_sources",
+    "drafted",
+    "in_review",
+    "published",
+    "rejected",
+)
+
+
+class ArticleGroup(Base):
+    """The unit an article is written for: one promise, one run's qualifying events."""
+
+    __tablename__ = "article_groups"
+    __table_args__ = (CheckConstraint(_in("state", GROUP_STATES), name="state"),)
+
+    group_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    meter_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("meters.id"), index=True)
+    promise_id: Mapped[uuid.UUID] = mapped_column(Uuid, index=True)
+    state: Mapped[str] = mapped_column(String(16), index=True)
+    sufficient: Mapped[bool | None] = mapped_column(Boolean)
+    notes: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+VERDICTS = ("verified", "verified_partial", "unverifiable", "broken")
+SOURCE_ROLES = ("promise_page", "required", "context")
+
+
+class ArticleGroupSource(Base):
+    """A source's verdict for one article group (relevance depends on the promise)."""
+
+    __tablename__ = "article_group_sources"
+    __table_args__ = (
+        CheckConstraint(_in("verdict", VERDICTS), name="verdict"),
+        CheckConstraint(_in("role", SOURCE_ROLES), name="role"),
+    )
+
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("article_groups.group_id"), primary_key=True
+    )
+    source_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sources.source_id"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(String(16))
+    event_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)  # the event this source backs
+    relevant: Mapped[bool | None] = mapped_column(Boolean)
+    relevance_confidence: Mapped[float | None] = mapped_column()
+    reason: Mapped[str | None] = mapped_column(Text)
+    verdict: Mapped[str] = mapped_column(String(20))
+    citable: Mapped[bool] = mapped_column(Boolean)
+
+
+ARTICLE_STATES = ("in_review", "needs_attention", "approved", "rejected", "stale", "published")
+
+
+class Article(Base):
+    """A drafted article (PRD §4.4). One per article group, ever (UNIQUE)."""
+
+    __tablename__ = "articles"
+    __table_args__ = (CheckConstraint(_in("state", ARTICLE_STATES), name="state"),)
+
+    article_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    article_group_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("article_groups.group_id"), unique=True
+    )
+    meter_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("meters.id"), index=True)
+    promise_id: Mapped[uuid.UUID] = mapped_column(Uuid, index=True)
+    event_ids: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    headline: Mapped[str] = mapped_column(Text)
+    body_markdown: Mapped[str] = mapped_column(Text)
+    body_html: Mapped[str | None] = mapped_column(Text)
+    word_count: Mapped[int] = mapped_column(Integer)
+    source_ids: Mapped[list[int]] = mapped_column(JSON_TYPE, default=list)
+    qa_flags: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    rewrite_count: Mapped[int] = mapped_column(Integer, default=0)
+    writer_input: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)  # audit: exactly what was given
+    state: Mapped[str] = mapped_column(String(20), index=True)
+    coordinator_email: Mapped[str | None] = mapped_column(String(255))
+    decision_note: Mapped[str | None] = mapped_column(Text)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

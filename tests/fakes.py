@@ -74,6 +74,8 @@ class FakeLLM:
     """Scripted LLMClient: returns queued outputs (or raises queued exceptions) in order.
 
     ``default`` is returned when the queue is empty; ``None`` means fail loudly.
+    Raw search hits: an output may carry ``"__search_hits__": [url, ...]``; otherwise, for
+    News Scout-shaped outputs, every result URL is treated as found in search (grounded).
     """
 
     def __init__(self, *outputs: dict[str, Any] | Exception, default: dict[str, Any] | None = None):
@@ -90,4 +92,16 @@ class FakeLLM:
             raise AssertionError(f"unexpected LLM call: {request.task}")
         if isinstance(item, Exception):
             raise item
-        return LLMResponse(output=item, model="fake-model", latency_ms=1, cost_usd=0.0)
+        from promise_monitor.llm.base import SearchHit
+
+        output = dict(item)
+        hits = output.pop("__search_hits__", None)
+        if hits is None:
+            hits = [r.get("url", "") for r in output.get("results", []) if isinstance(r, dict)]
+        return LLMResponse(
+            output=output,
+            model="fake-model",
+            latency_ms=1,
+            cost_usd=0.0,
+            search_hits=tuple(SearchHit(u, f"title of {u}", "q") for u in hits),
+        )

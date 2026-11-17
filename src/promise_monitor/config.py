@@ -84,6 +84,9 @@ class NewsConfig(_Strict):
 class LLMModels(_Strict):
     classifier: str
     news_scout: str
+    verifier: str
+    writer: str
+    editor: str
     default: str
 
 
@@ -113,6 +116,11 @@ class VerifierConfig(_Strict):
     max_parallel_hosts: PositiveInt
     relevance_min_confidence: float = Field(ge=0, le=1)
     cache_days: PositiveInt
+    max_bytes: PositiveInt
+    min_text_chars: PositiveInt
+    max_context_sources: int = Field(ge=0)
+    max_groups_per_run: PositiveInt
+    date_tolerance_days: int = Field(ge=0)
 
 
 class ArticleConfig(_Strict):
@@ -122,6 +130,9 @@ class ArticleConfig(_Strict):
     max_rewrites: int = Field(ge=0)
     dedupe_similarity: float = Field(gt=0, le=1)
     dedupe_window_days: PositiveInt
+    max_headline_words: PositiveInt
+    max_quote_words: PositiveInt
+    max_groups_per_run: PositiveInt
 
     @property
     def min_words(self) -> int:

@@ -10,7 +10,7 @@ Pipeline: `Publisher(pending approvals) → Discovery → [per meter: Monitor �
 
 ## Current phase
 
-**P0–P3 done** (skeleton; API client + Discovery; Monitor + snapshots; Classifier + dedupe + LLM adapter + News Scout). Next: P4 (Source Verifier). Build by PRD §8 phases, **one phase per branch**. Don't start a phase until the previous one's exit criteria pass. Pipeline CLI commands exit with code 2 until their phase lands.
+**P0–P5 done** (skeleton; Discovery; Monitor; Classifier + LLM adapter + News Scout; Source Verifier; Writer + Editor). Next: P6 (Google Sheets review loop). Build by PRD §8 phases, **one phase per branch**. Don't start a phase until the previous one's exit criteria pass. Pipeline CLI commands exit with code 2 until their phase lands.
 
 ## Stack
 
@@ -40,7 +40,13 @@ src/promise_monitor/
   agents/discovery.py    # collect() = network, apply_discovery() = DB; see module docstring
   agents/monitor.py      # monitor_meter(): cheap pass → details → anomaly guard → snapshots → RawDiffs
   agents/classifier.py   # classify(): RawDiffs + NewsFindings → change_events (score, dedupe_key, group)
-  agents/news_scout.py   # run_news_scout(): Claude web search in batches → code-side gate → news_items
+  agents/news_scout.py   # run_news_scout(): Claude web search in batches → code-side gate (incl. grounding) → news_items
+  agents/verifier.py     # Verifier.run(): queued groups → fetch/extract/search-confirm/relevance → verified | needs_sources
+  domain/fetch.py        # SafeFetcher: SSRF guard per hop, per-host throttle, byte/time/redirect caps
+  domain/extract.py      # HTML/PDF → title, published date, publisher, text, paywall marker
+  domain/qa.py           # deterministic article QA: every rule from PRD §3.6 lives here
+  agents/writer.py       # run_draft_loop() (pure: writer → QA → editor, ≤3 rewrites) + Drafter (DB)
+  evals.py               # writer eval cases from fixtures (`promise-monitor eval-writer`)
   domain/urls.py         # normalize_url, outlet allowlist (config/news_sources.yaml)
   llm/                   # base (LLMClient, LLMRequest), claude_cli, prompts, recording (llm_calls), factory
   api/client.py          # PromiseTrackerClient — the ONLY place that calls admin.promisetracker.ng
@@ -75,6 +81,9 @@ uv run promise-monitor discover --dry-run   # live API, prints meters, no DB wri
 uv run promise-monitor discover             # upsert the meter registry
 uv run promise-monitor monitor [--meter ID] [--full/--no-full] [--dry-run] [--no-llm]   # snapshot + classify
 uv run promise-monitor news-scan [--max-calls N] [--dry-run]   # Claude web search → news_update events
+uv run promise-monitor verify [--limit N] [--dry-run]          # verify sources of queued article groups
+uv run promise-monitor write [--limit N] [--dry-run]           # draft articles for verified groups
+uv run promise-monitor eval-writer [--cases N]                 # live Writer eval; exit 1 if pass rate < 90%
 uv run promise-monitor run --meter <meter_id>
 uv run promise-monitor publish
 ```
@@ -88,6 +97,8 @@ Run `make check` before declaring any task done.
 - `is_published` is the string `"1"`. `rating_source_url` may be the string `"None"`. `subject_area` may be `"null"`. Dates may be `1970-01-01` (treat as null). `last_updated_at` is not ISO.
 - Evidence links are only inside `updates[].blog` HTML. `source` may embed URLs in text ("(source: https://…)").
 - The public rating is `last_published_status` (falls back to `status`); `status` may be an unpublished draft.
+- Grounding: Claude Code's `--output-format stream-json --verbose` emits `tool_use_result` events with the RAW WebSearch hits (title and url). These come from the tool, not the model. `LLMResponse.search_hits` exposes them. Any URL an LLM gives us must be checked against them before it is trusted.
+- About half the allowlisted outlets return 403 or 401 to our honest UA (Channels, TheCable, Vanguard, Guardian NG, Reuters); WebFetch is blocked too. Never spoof a browser UA; confirm through grounding instead.
 - `claude -p` calls: never use `--bare` (it ignores the OAuth login). Always put `--` before the prompt, because variadic flags like `--allowedTools` swallow it otherwise. Use `--system-prompt` + `--tools` + `--setting-sources ""` + `--strict-mcp-config` and an empty cwd to keep each call around 1k tokens of overhead.
 - selectolax: use `selectolax.lexbor` (the old `selectolax.parser` backend raises ImportError in 1.x).
 - Public promise URL: `https://promisetracker.ng/blog/{promise_id}`.
@@ -103,7 +114,7 @@ Run `make check` before declaring any task done.
 3. **No auto-publish.** Articles reach `site/` only after a coordinator sets `approve` in the Sheet.
 4. **Snapshots are append-only.** Never update or delete a snapshot row; a Postgres trigger rejects it anyway. Mutable per-promise state belongs in `promise_index`. Never write a snapshot from a response that failed validation.
 5. **First sight = baseline.** A new meter's first pass emits no change events.
-6. **Articles:** 95–105 words (body, anchor text counted, URLs not), at least 2 markdown links, every URL from the verified citable set, descriptive anchors, neutral. All of this is enforced in code (`agents/editor.py`), not just in prompts.
+6. **Articles:** 95–105 words (body, anchor text counted, URLs not), at least 2 markdown links, every URL from the verified citable set, descriptive anchors, neutral. All of this is enforced in code (`domain/qa.py`), not just in prompts. If you change a QA rule, change `prompts/writer.md` to match and run `eval-writer`.
 7. **Politeness:** at most 1 request per second to the promisetracker API, one at a time. Identifying User-Agent. Retry and backoff exactly as in PRD §5.3.
 8. **Privacy:** drop the API's `admin{}` (staff names) at parse time. Never log secrets, tokens, or coordinator emails at info level.
 9. **LLM only for judgement:** classifier adjustment, relevance, writing, and the editor review. Fetching, diffing, counting, link checks and dedupe are plain code. Every LLM call goes through `LLMClient` and is recorded in `llm_calls`.

@@ -6,6 +6,7 @@ and say which phase implements them, so cron never silently "succeeds".
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -20,6 +21,8 @@ from promise_monitor.agents.classifier import classify
 from promise_monitor.agents.discovery import SiteDownError, apply_discovery, collect, priority_key
 from promise_monitor.agents.monitor import monitor_meter
 from promise_monitor.agents.news_scout import run_news_scout
+from promise_monitor.agents.verifier import Verifier
+from promise_monitor.agents.writer import Drafter, run_draft_loop
 from promise_monitor.api.client import PromiseTrackerClient, RateLimitedError
 from promise_monitor.config import ConfigError, get_settings, load_app_config
 from promise_monitor.db.base import (
@@ -28,7 +31,18 @@ from promise_monitor.db.base import (
     make_session_factory,
     ping,
 )
-from promise_monitor.db.models import ChangeEvent, Meter, Run
+from promise_monitor.db.models import (
+    Article,
+    ArticleGroup,
+    ArticleGroupSource,
+    ChangeEvent,
+    Meter,
+    Run,
+    Source,
+)
+from promise_monitor.domain.fetch import SafeFetcher
+from promise_monitor.evals import build_cases, qa_context
+from promise_monitor.llm.base import LLMError
 from promise_monitor.llm.factory import make_llm
 from promise_monitor.llm.recording import RecordingLLMClient
 from promise_monitor.logging_setup import configure_logging, get_logger
@@ -392,6 +406,195 @@ def news_scan(
         typer.echo("Claude login failed: run `claude` once interactively and /login", err=True)
         raise typer.Exit(code=1)
     typer.echo(f"{run_row.status}: events={events} queued_groups={groups}")
+
+
+@app.command()
+def verify(
+    limit: Annotated[int | None, typer.Option(help="Max article groups this run.")] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Verify, print, then roll back DB writes.")
+    ] = False,
+) -> None:
+    """Fetch and judge the sources of queued article groups (PRD §3.4)."""
+    settings = get_settings()
+    configure_logging(settings.log_dir, settings.log_level, console=False)
+    cfg = load_app_config(settings.config_dir)
+    try:
+        engine = make_engine(settings.database_url)
+    except DatabaseNotConfiguredError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    now = datetime.now(UTC)
+    ua = cfg.tunables.api.user_agent + (
+        f" (+source verification; contact: {settings.admin_email})" if settings.admin_email else ""
+    )
+    with make_session_factory(engine)() as session:
+        run_row = Run(started_at=now, trigger="cli:verify" + (":dry-run" if dry_run else ""))
+        session.add(run_row)
+        session.flush()
+        if not dry_run:
+            session.commit()
+        structlog.contextvars.bind_contextvars(run_id=str(run_row.run_id))
+        llm = RecordingLLMClient(make_llm(cfg.tunables.llm), session, run_row.run_id)
+        with SafeFetcher(cfg.tunables.verifier, ua) as fetcher:
+            verifier = Verifier(
+                session,
+                fetcher,
+                llm,
+                cfg=cfg.tunables.verifier,
+                public_promise_url=cfg.tunables.api.public_promise_url,
+                now=now,
+            )
+            res = verifier.run(limit)
+
+        for gid in res.group_ids:
+            group = session.get(ArticleGroup, gid)
+            if group is None:
+                continue
+            typer.echo(f"{group.state:<13} group={gid} promise={group.promise_id}")
+            for ags, src in session.execute(
+                select(ArticleGroupSource, Source)
+                .join(Source, Source.source_id == ArticleGroupSource.source_id)
+                .where(ArticleGroupSource.group_id == gid)
+            ):
+                conf = ags.relevance_confidence
+                typer.echo(
+                    f"    {ags.verdict:<16} {ags.role:<12} fetch={src.fetch_status:<9} "
+                    f"conf={'-' if conf is None else round(conf, 2)} {src.url[:90]}"
+                )
+            for note in group.notes or []:
+                typer.echo(f"    note: {note[:140]}")
+
+        run_row.status = "degraded" if (res.deferred or res.auth_failed) else "ok"
+        run_row.finished_at = datetime.now(UTC)
+        run_row.stats = {"verify": {k: v for k, v in res.__dict__.items() if k != "group_ids"}}
+        if dry_run:
+            session.rollback()
+            typer.echo("dry run: all DB writes rolled back")
+        else:
+            session.commit()
+        structlog.contextvars.clear_contextvars()
+    typer.echo(
+        f"{run_row.status}: groups={res.groups} verified={res.verified} "
+        f"needs_sources={res.needs_sources} deferred={res.deferred} fetched={res.fetched} "
+        f"cache_hits={res.cache_hits} llm_calls={res.llm_calls}"
+    )
+    if res.auth_failed:
+        typer.echo("Claude login failed: run `claude` once interactively and /login", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def write(
+    limit: Annotated[int | None, typer.Option(help="Max article groups this run.")] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Draft and print, then roll back DB writes.")
+    ] = False,
+) -> None:
+    """Draft articles for verified groups: Writer → QA → Editor, ≤3 rewrites (PRD §3.5-3.6)."""
+    settings = get_settings()
+    configure_logging(settings.log_dir, settings.log_level, console=False)
+    cfg = load_app_config(settings.config_dir)
+    try:
+        engine = make_engine(settings.database_url)
+    except DatabaseNotConfiguredError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    now = datetime.now(UTC)
+    with make_session_factory(engine)() as session:
+        run_row = Run(started_at=now, trigger="cli:write" + (":dry-run" if dry_run else ""))
+        session.add(run_row)
+        session.flush()
+        if not dry_run:
+            session.commit()
+        structlog.contextvars.bind_contextvars(run_id=str(run_row.run_id))
+        llm = RecordingLLMClient(make_llm(cfg.tunables.llm), session, run_row.run_id)
+        drafter = Drafter(
+            session,
+            llm,
+            cfg=cfg.tunables.article,
+            banned_terms=cfg.banned_terms,
+            public_promise_url=cfg.tunables.api.public_promise_url,
+            now=now,
+        )
+        res = drafter.run(limit)
+        for aid in res.article_ids:
+            art = session.get(Article, aid)
+            assert art is not None
+            typer.echo(
+                f"\n[{art.state}] {art.word_count} words, {art.rewrite_count} rewrite(s), "
+                f"article={art.article_id}"
+            )
+            typer.echo(f"  HEADLINE: {art.headline}")
+            typer.echo(f"  {art.body_markdown}")
+            for flag in art.qa_flags:
+                typer.echo(f"  FLAG: {flag}")
+        run_row.status = "degraded" if (res.deferred or res.auth_failed) else "ok"
+        run_row.finished_at = datetime.now(UTC)
+        run_row.stats = {"write": {k: v for k, v in res.__dict__.items() if k != "article_ids"}}
+        if dry_run:
+            session.rollback()
+            typer.echo("dry run: all DB writes rolled back")
+        else:
+            session.commit()
+        structlog.contextvars.clear_contextvars()
+    typer.echo(
+        f"\n{run_row.status}: groups={res.groups} in_review={res.in_review} "
+        f"needs_attention={res.needs_attention} deferred={res.deferred}"
+    )
+    if res.auth_failed:
+        typer.echo("Claude login failed: run `claude` once interactively and /login", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("eval-writer")
+def eval_writer(
+    cases: Annotated[int | None, typer.Option(help="Run only the first N cases.")] = None,
+) -> None:
+    """Run the real Writer+Editor loop on fixture cases; report the QA pass rate (P5 exit)."""
+    settings = get_settings()
+    configure_logging(settings.log_dir, settings.log_level, console=False)
+    cfg = load_app_config(settings.config_dir)
+    acfg = cfg.tunables.article
+    llm = make_llm(cfg.tunables.llm)
+    all_cases = build_cases()[: cases or None]
+    results = []
+    for case in all_cases:
+        qa = qa_context(case, cfg.banned_terms, acfg.min_words, acfg.max_words)
+        try:
+            loop = run_draft_loop(llm, case.writer_input, qa, acfg, subject_id=case.name)
+        except LLMError as exc:
+            typer.echo(f"ERROR {case.name}: {exc}", err=True)
+            results.append({"case": case.name, "passed": False, "error": str(exc)})
+            continue
+        words = loop.report.word_count if loop.report else 0
+        typer.echo(
+            f"{'PASS' if loop.passed else 'FAIL'} {case.name:<28} attempts={loop.attempts} "
+            f"words={words}"
+        )
+        for i, issues in enumerate(loop.history):
+            for issue in issues:
+                typer.echo(f"     try{i + 1}: {issue[:120]}")
+        results.append(
+            {
+                "case": case.name,
+                "passed": loop.passed,
+                "attempts": loop.attempts,
+                "words": words,
+                "history": loop.history,
+                "headline": loop.headline,
+                "body": loop.body,
+            }
+        )
+    passed = sum(1 for r in results if r["passed"])
+    rate = passed / len(results) if results else 0.0
+    out = settings.log_dir / f"eval-writer-{datetime.now(UTC):%Y%m%dT%H%M%S}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(results, indent=1, ensure_ascii=False), encoding="utf-8")
+    typer.echo(f"\npass rate: {passed}/{len(results)} = {rate:.0%} (target >= 90%); details: {out}")
+    if rate < 0.9:
+        raise typer.Exit(code=1)
 
 
 @app.command()
