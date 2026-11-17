@@ -1,0 +1,29 @@
+# Outlets the News Scout may cite (PRD §3.9). Enforced in code: any result whose host is not
+# listed here (exact domain or subdomain) is rejected, whatever the model returns.
+# Keep the list editorially balanced; changes are an editorial decision, note them in the PR.
+outlets:
+  # Nigerian national press / broadcasters
+  - {domain: premiumtimesng.com, name: Premium Times}
+  - {domain: punchng.com, name: Punch}
+  - {domain: thecable.ng, name: TheCable}
+  - {domain: channelstv.com, name: Channels Television}
+  - {domain: vanguardngr.com, name: Vanguard}
+  - {domain: guardian.ng, name: The Guardian Nigeria}
+  - {domain: businessday.ng, name: BusinessDay}
+  - {domain: dailytrust.com, name: Daily Trust}
+  - {domain: thisdaylive.com, name: ThisDay}
+  - {domain: thenationonlineng.net, name: The Nation}
+  - {domain: leadership.ng, name: Leadership}
+  - {domain: tribuneonlineng.com, name: Nigerian Tribune}
+  - {domain: arise.tv, name: Arise News}
+  - {domain: nannews.ng, name: News Agency of Nigeria}
+  - {domain: icirnigeria.org, name: The ICIR}
+  # International
+  - {domain: reuters.com, name: Reuters}
+  - {domain: apnews.com, name: Associated Press}
+  - {domain: bbc.com, name: BBC}
+  - {domain: aljazeera.com, name: Al Jazeera}
+# Official sources: primary evidence of an official action, e.g. a gazette, a bill page or a statement.
+official_suffixes:
+  - gov.ng
+  - nass.gov.ng

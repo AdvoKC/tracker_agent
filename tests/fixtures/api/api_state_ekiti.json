@@ -1,0 +1,15 @@
+{
+ "success": true,
+ "data": {
+  "promises": [],
+  "all_meters": [],
+  "promise_count": 0,
+  "not_rated": 0,
+  "in_works": 0,
+  "stalled": 0,
+  "compromised": 0,
+  "kept": 0,
+  "broken": 0
+ },
+ "message": "No current meter found"
+}

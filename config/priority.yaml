@@ -1,0 +1,9 @@
+# Processing order only: every active meter is still monitored on every run.
+# Lower rank = earlier. Unlisted meters get default_rank.
+# Keys: presidential | senate | house | "state:<Name>" (state promise_tracker meter)
+# | "ring:<Name>" (promise_ring governor meter). Names as in states.yaml.
+default_rank: 100
+ranks:
+  presidential: 1
+  senate: 2
+  house: 3

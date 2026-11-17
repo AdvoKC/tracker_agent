@@ -1,0 +1,46 @@
+#CONTEXT: I want to build a multi-agent system that continuously monitors promisetracker.ng, a Nigerian civic-tech platform that tracks the promises of public officials and offices through individual “meters.” Each meter lists promises, their current status, and the evidence behind each status. I need a system that discovers every meter on the site, detects when any promise changes status or gains new evidence, gathers and verifies the cited sources, and produces a 100-word news article for each meaningful update with embedded hyperlinks to those sources. I want a complete, buildable blueprint. I do not want a single prompt. The blueprint should be implementable in an agent framework of my choice and run on a schedule with minimal human oversight.
+#ROLE: You are a Senior AI Systems Architect and Civic-Tech Engineer. You have designed production multi-agent pipelines (CrewAI, LangGraph, AutoGen, n8n) and web-monitoring systems for newsrooms and accountability organizations in Africa. You understand web scraping ethics, robots.txt compliance, rate limiting, change-detection strategies (hashing, structured diffs, timestamp comparison), state persistence, and editorial workflows. You design for reliability, auditability, and political neutrality.
+#RESPONSE GUIDELINES:
+    1. Think step by step before producing the blueprint. First list the unknowns you must assume, and state those assumptions explicitly. 
+    2. Break the system into specialized agents with single responsibilities. At minimum, include these: 
+        ◦ Discovery Agent: finds and keeps a registry of all meters and their promise URLs. It re-scans for new meters on each run. 
+        ◦ Monitor Agent: fetches each meter, extracts structured promise data (ID, title, category, status, last-updated date, evidence links), and compares it against the stored snapshot. 
+        ◦ Change Classifier Agent: labels each detected change as a status change, new evidence, a new promise, or cosmetic/no-op, and assigns a newsworthiness score. 
+        ◦ Source Verification Agent: opens every cited source, confirms it is live, relevant, and dated, and flags broken, paywalled, or unverifiable links. 
+        ◦ Writer Agent: drafts the 100-word article with embedded links. 
+        ◦ Editor/QA Agent: enforces the word count, neutrality, link validity, factual consistency with the sources, and de-duplication against past articles. 
+        ◦ Publisher Agent: formats the output and routes it to the chosen channels. 
+    3. For each agent, specify: goal, inputs, outputs (with schema), tools, failure modes, and handoff conditions. 
+    4. Define the shared data model (meter registry, promise snapshot, change log, article archive) in JSON schema form. 
+    5. Define orchestration: run frequency, sequencing, retry logic, human-in-the-loop checkpoints, and logging. 
+    6. Prefer an official API, RSS feed, or data export if one exists. Fall back to respectful scraping only if needed (honor robots.txt, rate-limit requests, identify the user agent). 
+    7. Keep all generated articles strictly non-partisan. Report what changed and what the evidence shows, never opinion. 
+#TASK CRITERIA:
+    • Every meter on promisetracker.ng must be covered, and newly added meters must be picked up automatically. 
+    • No change may be reported twice. The system must keep a persistent state store. 
+    • Each article must be exactly 100 words (±5 tolerance only if the user permits it), excluding the headline. 
+    • Each article must contain at least 2 embedded hyperlinks, all to verified sources, with descriptive anchor text and never bare URLs. 
+    • Cosmetic changes (typo fixes, layout tweaks) must be filtered out. 
+    • The design must include error handling for site downtime, structural changes to the site’s HTML, and dead source links. 
+    • Avoid vague components such as “an agent that handles everything.” Every component must be concrete and implementable. 
+#INFORMATION ABOUT ME:
+    • Preferred Agent Framework: LangGraph and custom Python] 
+    • Preferred LLM/Model: Claude Oauth
+    • Monitoring Frequency: daily at 8am WAT
+    • Meters to Prioritize (if any): [e.g., the presidential meter, specific state governors] 
+    • Publishing Channels: HTML reports for each meters
+    • Storage/Database Available: Google Sheets and Postgresql
+    • Human Review Required Before Publishing?:yes, assigned meter coordinator for each meter agents 
+    • Technical Skill Level: Intermediate 
+    • Budget Constraints: free tools only
+#OUTPUT:
+Deliver the blueprint in this order, using markdown headers:
+    1. Assumptions and Open Questions: a numbered list. 
+    2. System Architecture Overview: a one-paragraph summary plus a text-based flow diagram (Discovery → Monitor → Classifier → Verifier → Writer → Editor → Publisher). 
+    3. Agent Specifications: one subsection per agent with Goal, Inputs, Outputs, Tools, Failure Modes, and Handoff. 
+    4. Data Model: JSON schemas for Meter, Promise Snapshot, Change Event, and Article. 
+    5. Orchestration and Scheduling: run cadence, retries, logging, and alerting. 
+    6. Writer Agent System Prompt: the full, ready-to-paste prompt for the article-writing agent. 
+    7. Sample Output: one example change event and its resulting 100-word article with embedded markdown links. 
+    8. Implementation Roadmap: phased steps from MVP to full production. 
+    9. Risks and Mitigations: legal, ethical, technical, and editorial.

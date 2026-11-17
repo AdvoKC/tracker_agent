@@ -1,0 +1,19 @@
+{
+ "success": true,
+ "data": [
+  {
+   "id": "d59bd0b3-95c8-4fbd-acf8-9bf9a22bb778",
+   "name": "H.E Monday Okpebholo",
+   "meter_name": "h.e monday okpebholo",
+   "meter_img": "https://res.cloudinary.com/do5vpdlvp/image/upload/v1750141437/meter/gudxojkh8xk44kkhrxwz.jpg",
+   "tenure_date_start": "2024-11-24",
+   "tenure_date_end": "2028-11-24",
+   "is_archived": 0,
+   "archived_at": null,
+   "parent_meter_id": null,
+   "promise_tracker_id": "c8d31ab1-1622-42ac-ae28-cbbd05f45d2d",
+   "promises_count": 0
+  }
+ ],
+ "message": "Tenures fetched"
+}

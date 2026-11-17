@@ -1,0 +1,73 @@
+# Non-secret tunables. Secrets and machine-specific values go in .env (PM_* variables).
+
+api:
+  base_url: https://admin.promisetracker.ng/api/v1/promise-tracker
+  public_site_url: https://promisetracker.ng
+  public_promise_url: https://promisetracker.ng/blog/{promise_id}
+  user_agent: AdvoKC-PromiseMonitor/1.0
+  min_interval_seconds: 1.0
+  timeout_seconds: 20
+  max_retries: 3
+  backoff_base_seconds: 2
+  max_retry_after_seconds: 60
+
+monitor:
+  full_sweep_weekday: 6        # 0=Mon .. 6=Sun
+  anomaly_change_ratio: 0.30
+  anomaly_min_changes: 5       # guard only trips when at least this many known promises change
+
+classifier:
+  news_threshold: 60
+  cosmetic_max_edit_ratio: 0.15
+  llm_review_max_edit_ratio: 0.40
+  llm_max_adjustment: 15
+  base_scores:
+    status_change: 70
+    new_evidence: 50
+    new_promise: 45
+    news_update: 55
+  bonus_final_status: 10          # new status kept / broken / compromised
+  bonus_priority_meter: 10        # meter priority_rank <= priority_meter_max_rank
+  priority_meter_max_rank: 3
+  bonus_high_priority_promise: 5
+  bonus_news_high_confidence: 10  # news relevance >= 0.9
+
+news:
+  enabled: true
+  batch_size: 10                  # promises per Claude web-search call
+  max_calls_per_run: 12           # 12 x 10 = 120 promises/day; full rotation ~every 3 days
+  lookback_days: 30               # never report news older than this
+  min_relevance: 0.75
+  max_results_per_promise: 3
+
+llm:
+  backend: claude_cli             # claude_cli | (later) anthropic_api
+  claude_bin: claude
+  timeout_seconds: 420
+  max_retries: 1
+  models:
+    classifier: claude-haiku-5-5
+    news_scout: claude-sonnet-5-5
+    default: claude-sonnet-5-5
+
+verifier:
+  timeout_seconds: 15
+  max_redirects: 5
+  max_retries: 2
+  per_host_interval_seconds: 1.0
+  max_parallel_hosts: 4
+  relevance_min_confidence: 0.6
+  cache_days: 7
+
+article:
+  target_words: 100
+  tolerance_words: 5
+  min_links: 2
+  max_rewrites: 3
+  dedupe_similarity: 0.9
+  dedupe_window_days: 90
+
+review:
+  stale_after_days: 7
+
+timezone_display: Africa/Lagos

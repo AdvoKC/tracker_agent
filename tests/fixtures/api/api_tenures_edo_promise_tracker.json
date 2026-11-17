@@ -1,0 +1,19 @@
+{
+ "success": true,
+ "data": [
+  {
+   "id": "b22f773a-ce6e-4ca1-9006-82f9d30c71c6",
+   "name": "Monday Okpebholo",
+   "meter_name": "okpebholometer",
+   "meter_img": "https://res.cloudinary.com/do5vpdlvp/image/upload/v1731401879/meter/ggl2smqkamebacqvdygx.png",
+   "tenure_date_start": "2024-11-12",
+   "tenure_date_end": "2028-11-12",
+   "is_archived": 0,
+   "archived_at": null,
+   "parent_meter_id": null,
+   "promise_tracker_id": "c8d31ab1-1622-42ac-ae28-cbbd05f45d2d",
+   "promises_count": 29
+  }
+ ],
+ "message": "Tenures fetched"
+}

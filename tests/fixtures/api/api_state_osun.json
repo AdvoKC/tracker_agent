@@ -1,0 +1,62 @@
+{
+ "success": true,
+ "data": {
+  "promises": [],
+  "all_meters": [
+   {
+    "id": "963c830a-6781-406c-8f32-a46344bdfc5e",
+    "name": "Gov. Ademola Adeleke",
+    "meter_name": "adelekemeter",
+    "tenure_date_start": "2026-11-27",
+    "tenure_date_end": "2030-11-26",
+    "meter_img": "https://res.cloudinary.com/do5vpdlvp/image/upload/v1790347031/meter/kpe3kxrohf3q0lvlcfim.jpg",
+    "chamber": null,
+    "state_id": "1044ea87-2736-46f4-b9fc-b42846405b68",
+    "is_archived": 0,
+    "parent_meter_id": "b22f773a-ce6e-4ca1-9006-82f9d30c71c6"
+   },
+   {
+    "id": "ceb7ef56-467a-4460-8b14-3d8080beb041",
+    "name": "Gov. Ademola Adeleke",
+    "meter_name": "gov. ademola adeleke",
+    "tenure_date_start": "2026-12-16",
+    "tenure_date_end": "2030-11-22",
+    "meter_img": "https://res.cloudinary.com/do5vpdlvp/image/upload/v1789744271/meter/kjs46tnd34duge7oq7vz.jpg",
+    "chamber": null,
+    "state_id": "1044ea87-2736-46f4-b9fc-b42846405b68",
+    "is_archived": 0,
+    "parent_meter_id": null
+   }
+  ],
+  "current_meter": {
+   "id": "963c830a-6781-406c-8f32-a46344bdfc5e",
+   "promise_tracker_id": "c8d31ab1-1622-42ac-ae28-cbbd05f45d2d",
+   "name": "Gov. Ademola Adeleke",
+   "state_id": "1044ea87-2736-46f4-b9fc-b42846405b68",
+   "chamber": null,
+   "meter_name": "adelekemeter",
+   "slug": "gov-ademola-adeleke-2026-2030-2",
+   "meter_type": "promise_tracker",
+   "is_archived": 0,
+   "archived_at": null,
+   "archived_by": null,
+   "parent_meter_id": "b22f773a-ce6e-4ca1-9006-82f9d30c71c6",
+   "description": "The Promise Tracker of Ademola Adeleke",
+   "tenure_date_start": "2026-11-27",
+   "tenure_date_end": "2030-11-26",
+   "meter_img": "https://res.cloudinary.com/do5vpdlvp/image/upload/v1790347031/meter/kpe3kxrohf3q0lvlcfim.jpg",
+   "admin_id": 4,
+   "deleted_at": null,
+   "created_at": "2026-09-25T14:37:12.000000Z",
+   "updated_at": "2026-09-25T14:37:12.000000Z"
+  },
+  "promise_count": 0,
+  "not_rated": null,
+  "in_works": null,
+  "stalled": null,
+  "compromised": null,
+  "kept": null,
+  "broken": null
+ },
+ "message": "Current Meter fetched Successfully"
+}

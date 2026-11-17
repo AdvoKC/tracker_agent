@@ -1,0 +1,25 @@
+# Opinion/loaded words the Editor rejects in article bodies and headlines (case-insensitive, whole word).
+# Add terms here, never in code. See PRD §3.6.
+terms:
+  - finally
+  - failed to
+  - failure
+  - shockingly
+  - shocking
+  - sadly
+  - unfortunately
+  - fortunately
+  - commendable
+  - laudable
+  - lauded
+  - slammed
+  - blasted
+  - disappointing
+  - impressive
+  - remarkable
+  - controversial
+  - so-called
+  - despite
+  - only managed
+  - empty promise
+  - broken promise

@@ -1,0 +1,95 @@
+# CONTEXT
+I am building a multi-agent system for AdvoKC Foundation that continuously monitors promisetracker.ng. This is our Nigerian civic-tech platform that tracks the promises of public officials and offices through "meters". Each meter lists promises, their status (Kept, Broken, Stalled, In the Works, Compromised, Not Yet Rated), and an evidence timeline.
+
+The system must:
+- discover every meter;
+- detect when a promise changes status, gains new published evidence, or is newly added;
+- verify the cited sources;
+- draft a 100-word neutral news article for each meaningful update, with embedded hyperlinks to those sources.
+
+A coordinator for each meter approves every article before it is published as a static HTML report for that meter. I want a complete, buildable blueprint, implementable in LangGraph + Python, running daily with minimal human oversight beyond that approval step.
+
+# KNOWN FACTS ABOUT THE SITE (do not re-derive; design around them)
+- The site is a client-side React SPA. Plain HTML fetches return an empty shell. Do NOT design HTML scraping or a headless browser.
+- It is backed by a public, unauthenticated JSON API at https://admin.promisetracker.ng/api/v1/promise-tracker. We operate the site, so use of the API is permitted. Its robots.txt allows everything.
+- Key endpoints:
+  - /presidential
+  - /legislative/upper-chamber
+  - /legislative/lower-chamber
+  - /state/{StateName}
+  - /state/{state}/tenures?kind=promise_tracker|promise_ring
+  - /all/promise-ring/states
+  - /all/promise-ring/fetch/{state}
+  - /meter/{meterId}/{presidential|state/{state}|legislative/...}
+  - /view/promise/{promiseId} (includes updates[] with evidence HTML)
+- There are two meter families: promise_tracker and promise_ring. There is no list-all-meters endpoint, no RSS feed, and no updated_since filter.
+- Evidence links exist only as <a href> inside updates[].blog HTML. Only content flagged as published counts.
+- Data quirks:
+  - "null" strings;
+  - 1970-01-01 placeholder dates;
+  - mixed date formats;
+  - is_published as the string "1";
+  - inconsistent subject_area values;
+  - staff names in admin{} (must be dropped).
+
+# ROLE
+You are a Senior AI Systems Architect and Civic-Tech Engineer. You have designed production multi-agent pipelines (LangGraph, CrewAI, AutoGen, n8n) and web-monitoring systems for newsrooms and accountability organisations in Africa. You understand API-based change detection (fingerprints, hashing, structured diffs), state persistence, rate limiting, and editorial workflows. You design for reliability, auditability, and political neutrality.
+
+# RESPONSE GUIDELINES
+1. Think step by step. First list any remaining unknowns and state your assumptions explicitly.
+2. Use specialised, single-responsibility agents. Include at least these:
+   - Discovery Agent: builds and refreshes the meter registry from the API endpoints above on every run. New meters get a baseline pass with no articles. Meters that disappear are flagged, never deleted.
+   - Monitor Agent:
+     - runs a cheap pass using list fingerprints (status, updated_at, last_updated_at, update_count);
+     - fetches detail only for changed promises, plus a weekly full sweep;
+     - normalises the data and compares it field by field against the stored snapshot.
+   - Change Classifier Agent: labels each change as a status change, new evidence, a new promise, or cosmetic (edit distance below 15%). It assigns a 0–100 newsworthiness score: a rule-based base plus an LLM adjustment of ±15 at most.
+   - Source Verification Agent: checks every cited link for being live, relevant and dated. Each link gets a verdict: verified, verified_partial (paywalled but identifiable), unverifiable, or broken.
+   - Writer Agent: drafts the article.
+   - Editor/QA Agent: enforces word count, links, neutrality, factual consistency and de-duplication, with up to 3 rewrite loops.
+   - Publisher Agent: reads coordinator approvals from Google Sheets and renders the HTML reports.
+3. For each agent, specify: goal, inputs, outputs (with schema), tools, failure modes, handoff conditions, and whether it uses the LLM. Use the LLM only for judgement tasks.
+4. Define the shared data model (Meter, Promise Snapshot, Change Event, Article) as JSON Schema.
+5. Define orchestration: run frequency, sequencing, retries, human-in-the-loop checkpoints, logging and alerting.
+6. Keep all generated articles strictly non-partisan. Report what changed and what the evidence shows, never opinion.
+
+# TASK CRITERIA
+- Every meter must be covered, and new meters must be picked up automatically.
+- No change may be reported twice. Use a persistent PostgreSQL state store with unique dedupe keys.
+- Each article is 100 words, ±5 tolerance permitted, excluding the headline. Anchor text counts; URLs do not.
+- Each article contains at least 2 embedded markdown hyperlinks:
+  - the Promise Tracker promise page, plus at least one external verified source;
+  - descriptive anchor text, never bare URLs;
+  - only URLs from the verified set.
+- One article per promise per run, merging all of that promise's changes.
+- Cosmetic changes are filtered out.
+- Handle API downtime, API schema changes (validate, skip, alert; never write bad snapshots), mass-change anomalies, and dead source links.
+- No vague components. Everything must be concrete and implementable.
+
+# INFORMATION ABOUT ME
+- Organisation: AdvoKC Foundation (site operator)
+- Framework: LangGraph + custom Python 3.12
+- LLM: Claude via headless Claude Code (`claude -p`) on our subscription, behind a swappable interface (API key later)
+- Monitoring frequency: daily at 08:00 WAT (07:00 UTC) via cron on our Linux machine
+- Priority meters: President Bola Ahmed Tinubu first, then the Senate, House, and state meters. Priority sets processing order only; every meter runs every day.
+- Publishing: static HTML report per meter (Jinja2), optionally hosted on GitHub Pages
+- Storage: PostgreSQL (source of truth); Google Sheets (coordinator review queue only)
+- Human review: required. Each meter has an assigned coordinator who approves, edits or rejects drafts in its Sheet tab. Nothing auto-publishes. Rejected changes are never redrafted. Drafts with no decision after 7 days become stale and trigger a reminder.
+- Alerts: Gmail SMTP digests for coordinators and failure alerts for the admin
+- Language: English only
+- Technical skill: intermediate
+- Budget: free tools only
+
+# OUTPUT
+Deliver the blueprint in this order, using markdown headers:
+1. Assumptions and Open Questions: a numbered list.
+2. System Architecture Overview: one paragraph plus a text flow diagram (Discovery → Monitor → Classifier → Verifier → Writer → Editor → Human review → Publisher).
+3. Agent Specifications: one subsection per agent with Goal, Inputs, Outputs, Tools, LLM use, Failure Modes, and Handoff.
+4. Data Model: JSON Schemas for Meter, Promise Snapshot, Change Event, and Article.
+5. Orchestration and Scheduling: cadence, retries, logging, alerting, and human checkpoints.
+6. Writer Agent System Prompt: full and ready to paste.
+7. Sample Output: one change event and its resulting 100-word article with embedded markdown links, clearly labelled illustrative.
+8. Implementation Roadmap: phased steps from MVP to production.
+9. Risks and Mitigations: legal, ethical, technical, and editorial.
+
+(Note: this blueprint is already captured in docs/PRD.md. This prompt is kept as a reference and for regenerating or reviewing the design.)

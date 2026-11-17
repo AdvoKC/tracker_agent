@@ -1,0 +1,19 @@
+{
+ "success": true,
+ "data": [
+  {
+   "id": "963c830a-6781-406c-8f32-a46344bdfc5e",
+   "name": "Gov. Ademola Adeleke",
+   "meter_name": "adelekemeter",
+   "meter_img": "https://res.cloudinary.com/do5vpdlvp/image/upload/v1790347031/meter/kpe3kxrohf3q0lvlcfim.jpg",
+   "tenure_date_start": "2026-11-27",
+   "tenure_date_end": "2030-11-26",
+   "is_archived": 0,
+   "archived_at": null,
+   "parent_meter_id": "b22f773a-ce6e-4ca1-9006-82f9d30c71c6",
+   "promise_tracker_id": "c8d31ab1-1622-42ac-ae28-cbbd05f45d2d",
+   "promises_count": 0
+  }
+ ],
+ "message": "Tenures fetched"
+}

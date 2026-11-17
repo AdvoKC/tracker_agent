@@ -1,0 +1,41 @@
+# The 37 names exactly as the promisetracker.ng API expects them in /state/{name}.
+# Site spellings are kept on purpose ("Abuja" for FCT, "Nassarawa").
+# Taken from the site's JS bundle on 2026-11-16. Discovery alerts if any name stops resolving.
+states:
+  - Abia
+  - Abuja
+  - Adamawa
+  - Akwa Ibom
+  - Anambra
+  - Bauchi
+  - Bayelsa
+  - Benue
+  - Borno
+  - Cross River
+  - Delta
+  - Ebonyi
+  - Edo
+  - Ekiti
+  - Enugu
+  - Gombe
+  - Imo
+  - Jigawa
+  - Kaduna
+  - Kano
+  - Katsina
+  - Kebbi
+  - Kogi
+  - Kwara
+  - Lagos
+  - Nassarawa
+  - Niger
+  - Ogun
+  - Ondo
+  - Osun
+  - Oyo
+  - Plateau
+  - Rivers
+  - Sokoto
+  - Taraba
+  - Yobe
+  - Zamfara

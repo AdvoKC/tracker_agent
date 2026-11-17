@@ -1,0 +1,32 @@
+{
+ "success": true,
+ "data": [
+  {
+   "id": "d5ad9614-12b5-4dc2-9e89-c5af3ae295b2",
+   "name": "Abiodun Abayomi Oyebanji",
+   "meter_name": "abiodun abayomi oyebanji",
+   "meter_img": "https://res.cloudinary.com/do5vpdlvp/image/upload/v1743173897/meter/xfkfnhmf4cp3tnjjpdep.jpg",
+   "tenure_date_start": "2026-10-16",
+   "tenure_date_end": "2030-10-16",
+   "is_archived": 0,
+   "archived_at": null,
+   "parent_meter_id": null,
+   "promise_tracker_id": "c8d31ab1-1622-42ac-ae28-cbbd05f45d2d",
+   "promises_count": 0
+  },
+  {
+   "id": "a688f742-8aca-455d-ae96-b1ed959258b3",
+   "name": "Abiodun Oyebanji",
+   "meter_name": "abiodun oyebanji",
+   "meter_img": "https://res.cloudinary.com/do5vpdlvp/image/upload/v1756911283/meter/zmqt5ns6y27ad8xiuyz7.webp",
+   "tenure_date_start": "2022-09-16",
+   "tenure_date_end": "2026-09-16",
+   "is_archived": 1,
+   "archived_at": "2026-09-25 09:48:50",
+   "parent_meter_id": null,
+   "promise_tracker_id": "c8d31ab1-1622-42ac-ae28-cbbd05f45d2d",
+   "promises_count": 10
+  }
+ ],
+ "message": "Tenures fetched"
+}

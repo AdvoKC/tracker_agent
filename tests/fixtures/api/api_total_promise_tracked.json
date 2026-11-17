@@ -1,0 +1,14 @@
+{
+ "success": true,
+ "data": {
+  "total_promises": 409,
+  "stalled": 7,
+  "compromised": 22,
+  "kept": 85,
+  "broken": 56,
+  "in_the_works": 139,
+  "not_yet_rated": 100,
+  "reminders_sent": 3
+ },
+ "message": "Promise Tracked fetched Successfully"
+}
