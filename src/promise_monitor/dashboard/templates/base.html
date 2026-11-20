@@ -1,0 +1,78 @@
+{% from "_macros.html" import icon %}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block title %}Dashboard{% endblock %} · Promise Monitor</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/dashboard.css">
+<script src="/static/dashboard.js"></script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+{% if user %}
+{% set groups = [
+  ('Work', [('overview','/overview','Overview'), ('review','/review','Review'), ('meters','/meters','Meters')]),
+  ('Activity', [('updates','/updates','Updates'), ('searches','/searches','Searches'), ('sources','/sources','Sources')]),
+] %}
+{% if user.role == 'superadmin' %}
+{% set groups = groups + [('Admin', [('runs','/admin/runs','Runs'), ('jobs','/admin/jobs','Jobs'), ('settings','/admin/settings','Settings'), ('users','/admin/users','Users'), ('llm','/admin/llm','LLM usage'), ('audit','/admin/audit','Audit log')])] %}
+{% endif %}
+<div class="shell">
+  <aside class="side" id="sidebar" aria-label="Main navigation">
+    <a class="brand" href="/overview">
+      <span class="logo" role="img" aria-label="AdvoKC"></span>
+      <span class="brand-text">Promise Monitor</span>
+    </a>
+    <nav>
+      {% for gname, items in groups %}
+      <div class="nav-group">
+        <div class="nav-label">{{ gname }}</div>
+        {% for key, href, label in items %}
+        <a href="{{ href }}" class="nav-item{{ ' on' if nav == key }}"{% if nav == key %} aria-current="page"{% endif %}>{{ icon(key) }}<span>{{ label }}</span></a>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </nav>
+    <div class="side-foot">
+      <a href="/account/password" class="nav-item{{ ' on' if nav == 'account' }}">{{ icon('key') }}<span>{{ user.name }}<small class="role">{{ user.role }}</small></span></a>
+      <a href="/account/promise-tracker" class="nav-item{{ ' on' if nav == 'pt_token' }}">{{ icon('external') }}<span>Promise Tracker token</span></a>
+      <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="nav-item as-link" type="submit">{{ icon('logout') }}<span>Sign out</span></button></form>
+    </div>
+  </aside>
+  <div class="scrim" data-nav-close aria-hidden="true"></div>
+  <div class="page">
+    <header class="topbar">
+      <button class="icon-btn" type="button" data-nav-toggle aria-controls="sidebar" aria-expanded="false" aria-label="Open navigation" hidden>{{ icon('menu') }}</button>
+      <a class="topbar-brand" href="/overview"><span class="logo sm" role="img" aria-label="AdvoKC"></span><span>Promise Monitor</span></a>
+      <div class="topbar-right">
+        <span class="kbd-hint small muted">Press <kbd>?</kbd> for shortcuts</span>
+        <button class="icon-btn" type="button" data-theme-toggle aria-label="Toggle dark theme" hidden>{{ icon('moon', 'i moon') }}{{ icon('sun', 'i sun') }}</button>
+      </div>
+    </header>
+    <main id="content" tabindex="-1">
+      {% if flashes %}<div class="toasts" role="status" aria-live="polite">{% for kind, msg in flashes %}<div class="toast flash {{ kind }}">{{ icon('check' if kind == 'ok' else 'alert') }}<div class="toast-msg">{{ msg }}</div></div>{% endfor %}</div>{% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+<dialog id="shortcuts" aria-labelledby="sc-title">
+  <h2 id="sc-title">Keyboard shortcuts</h2>
+  <dl class="kv">
+    <dt><kbd>/</kbd></dt><dd>Focus the filter on this page</dd>
+    <dt><kbd>Ctrl</kbd> + <kbd>S</kbd></dt><dd>Save &amp; re-check a draft (review page)</dd>
+    <dt><kbd>Esc</kbd></dt><dd>Close menus and dialogs</dd>
+    <dt><kbd>?</kbd></dt><dd>Show this help</dd>
+  </dl>
+  <div class="actions"><button type="button" class="ghost" data-close-dialog>Close</button></div>
+</dialog>
+{% else %}
+<main id="content" class="auth" tabindex="-1">
+  {% if flashes %}<div class="toasts" role="status" aria-live="polite">{% for kind, msg in flashes %}<div class="toast flash {{ kind }}">{{ icon('check' if kind == 'ok' else 'alert') }}<div class="toast-msg">{{ msg }}</div></div>{% endfor %}</div>{% endif %}
+  {{ self.content() }}
+</main>
+{% endif %}
+</body>
+</html>

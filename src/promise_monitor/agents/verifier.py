@@ -5,7 +5,7 @@ For each queued article group (one promise, one run's qualifying events):
    - the promise page (always citable while the promise is present on the tracker);
    - REQUIRED: links backing the change itself — new updates' evidence links; for a status
      change without a new update, the latest update's links; for a new promise, its own
-     links; for a news_update, the news URL;
+     links; for a news_update, the news URL; for a coordinator_update, the coordinator's links;
    - CONTEXT: the promise's source/write-up links (at most ``max_context_sources``).
 2. Fetch each (cached ``cache_days``) with SafeFetcher; extract title/date/publisher/text.
 3. Blocked or paywalled pages: confirm existence from RAW search results — reusing the News
@@ -98,6 +98,8 @@ class _Src:
     confidence: float | None = None
     reason: str | None = None
     verdict: str = "unverifiable"
+    # a coordinator's earlier confirmation of a page that blocked us: (user_id, at, title)
+    confirmed: tuple[uuid.UUID, datetime, str | None] | None = None
 
 
 @dataclass
@@ -158,19 +160,61 @@ def _latest_content(session: Session, promise_id: uuid.UUID) -> dict[str, Any]:
     return row or {}
 
 
-def _describe(ev: ChangeEvent, news: NewsItem | None) -> str:
+def _update_texts(updates: list[dict[str, Any]]) -> str:
+    """Published Promise Tracker update text: it says why the cited links matter."""
+    texts = [str(u.get("text") or "")[:UPDATE_TEXT_CHARS] for u in updates]
+    return " | ".join(t for t in texts if t)
+
+
+def _describe(
+    ev: ChangeEvent, news: NewsItem | None, updates: dict[str, dict[str, Any]] | None = None
+) -> str:
+    updates = updates or {}
     if ev.change_type == "status_change":
-        return (
+        line = (
             f"Status moved from {STATUS_LABELS.get(ev.old_status or '', ev.old_status)} "
             f"to {STATUS_LABELS.get(ev.new_status or '', ev.new_status)} on Promise Tracker"
         )
+        if updates:
+            latest = max(updates.values(), key=lambda u: str(u.get("created_at", "")))
+            if text := _update_texts([latest]):
+                line += f". Latest published update: {text}"
+        return line
     if ev.change_type == "new_evidence":
-        return "New evidence update published on Promise Tracker"
+        text = _update_texts([updates[u] for u in ev.added_update_ids or [] if u in updates])
+        line = "New evidence update published on Promise Tracker"
+        return f"{line}: {text}" if text else line
     if ev.change_type == "new_promise":
         return "Promise newly added to the meter on Promise Tracker"
     if ev.change_type == "news_update" and news is not None:
         return f"News report ({news.outlet}, {news.published_date}): {news.headline}"
+    if ev.change_type == "coordinator_update":
+        rating = STATUS_LABELS.get(ev.new_status or "", ev.new_status)
+        return f"AdvoKC coordinator's update (rating: {rating}): {(ev.brief or '')[:1200]}"
     return ev.change_type
+
+
+UPDATE_TEXT_CHARS = 800
+COORDINATOR_CONFIRMED = "Page blocked the agent's reader; a coordinator opened it and confirmed it."
+_MIN_SLUG = 20  # shorter last path segments ("index", "news") are too generic to match on
+
+
+def _same_article(hit_url: str, url: str) -> bool:
+    """A search hit is the same article: same URL, or same host + same long slug (AMP etc.)."""
+    hit = normalize_url(hit_url)
+    if hit is None:
+        return False
+    if hit == url:
+        return True
+    if host_of(hit) != host_of(url):
+        return False
+
+    def slug(u: str) -> str:
+        parts = [p for p in u.split("?", 1)[0].split("/")[3:] if p and p != "amp"]
+        return parts[-1] if parts else ""
+
+    s = slug(url)
+    return len(s) >= _MIN_SLUG and slug(hit) == s
 
 
 class Verifier:
@@ -196,8 +240,34 @@ class Verifier:
 
     # ------------------------------------------------------------------ public
 
-    def run(self, limit: int | None = None) -> VerifyResult:
-        for gid in pending_groups(self.s, limit or self.cfg.max_groups_per_run, self.now):
+    def requeue(self, group_id: uuid.UUID, *, refresh: bool) -> None:
+        """Send one group back through verification (dashboard 'Re-verify sources')."""
+        group = self.s.get(ArticleGroup, group_id)
+        if group is None:
+            raise ValueError("group not found")
+        if group.state not in ("queued", "verified", "needs_sources"):
+            raise ValueError(f"group is {group.state}; redraft the article instead")
+        group.state = "queued"
+        for ev in self.s.scalars(
+            select(ChangeEvent).where(ChangeEvent.article_group_id == group_id)
+        ):
+            if ev.state in ("queued", "needs_sources"):
+                ev.state = "queued"
+        if refresh:
+            src_ids = self.s.scalars(
+                select(ArticleGroupSource.source_id).where(ArticleGroupSource.group_id == group_id)
+            ).all()
+            for src in self.s.scalars(select(Source).where(Source.source_id.in_(src_ids))):
+                src.checked_at = datetime(2000, 1, 1, tzinfo=UTC)
+                src.search_checked_at = None
+        self.s.flush()
+
+    def run(self, limit: int | None = None, only: uuid.UUID | None = None) -> VerifyResult:
+        if only is not None:  # a single group must not be cut off by the per-run limit
+            groups = [g for g in pending_groups(self.s, 1_000_000, self.now) if g == only]
+        else:
+            groups = pending_groups(self.s, limit or self.cfg.max_groups_per_run, self.now)
+        for gid in groups:
             self.result.groups += 1
             self.result.group_ids.append(gid)
             try:
@@ -236,19 +306,31 @@ class Verifier:
         }
         srcs = self._collect(group, events, content, news_by_id)
         notes: list[str] = []
+        previous = {
+            a.source_id: (a.confirmed_by, a.confirmed_at, a.confirmed_title)
+            for a in self.s.scalars(
+                select(ArticleGroupSource).where(
+                    ArticleGroupSource.group_id == gid, ArticleGroupSource.confirmed_by.isnot(None)
+                )
+            )
+        }
 
         for src in srcs:
             if src.role == "promise_page":
                 src.row = self._promise_page_source(src.url, content)
             else:
                 src.row = self._get_or_fetch(src.url)
+            prev = previous.get(src.row.source_id)
+            if prev is not None and prev[0] is not None and prev[1] is not None:
+                src.confirmed = (prev[0], prev[1], prev[2])
 
         for src in srcs:
             row = src.row
             assert row is not None
+            # A miss is retried sooner than a hit expires: new articles reach search late.
             recently_searched = row.search_checked_at is not None and _aware(
                 row.search_checked_at
-            ) >= self.now - timedelta(days=self.cfg.cache_days)
+            ) >= self.now - timedelta(days=self.cfg.search_retry_days)
             if (
                 row.fetch_status in ("blocked", "paywalled")
                 and not row.search_confirmed
@@ -306,6 +388,9 @@ class Verifier:
             elif ev.change_type == "news_update" and ev.news_item_id in news_by_id:
                 n = news_by_id[ev.news_item_id]
                 add(n.url, "required", ev.event_id, n.published_date)
+            elif ev.change_type == "coordinator_update":
+                for link in ev.brief_urls or []:
+                    add(link, "required", ev.event_id)
 
         context = [*content.get("source_urls", []), *content.get("blog_links", [])]
         for link in context[: self.cfg.max_context_sources]:
@@ -389,7 +474,7 @@ class Verifier:
             raise DeferredError(f"search confirm failed: {exc}") from exc
         row.search_checked_at = self.now  # cache negative results too
         for hit in resp.search_hits:
-            if normalize_url(hit.url) == row.url:
+            if _same_article(hit.url, row.url):
                 row.search_confirmed, row.search_title = True, hit.title or None
                 break
         self.s.flush()
@@ -425,8 +510,9 @@ class Verifier:
             )
         if not judgeable:
             return
+        updates = {u["update_id"]: u for u in content.get("updates") or [] if "update_id" in u}
         changes = "\n".join(
-            f"- {_describe(e, news_by_id.get(e.news_item_id or -1))}" for e in events
+            f"- {_describe(e, news_by_id.get(e.news_item_id or -1), updates)}" for e in events
         )
         system, user = self._relevance.render(
             promise_title=str(content.get("title", "")),
@@ -492,13 +578,18 @@ class Verifier:
                         f"date_mismatch: {row.url} published {row.published_date}, "
                         f"News Scout claimed {src.claimed_date}"
                     )
+            elif row.fetch_status in ("blocked", "paywalled") and src.confirmed is not None:
+                # A person opened the page and confirmed it; that outranks a title-only guess.
+                src.verdict, src.relevant, src.confidence = "verified_partial", True, 1.0
+                src.reason = COORDINATOR_CONFIRMED
             elif row.fetch_status in ("blocked", "paywalled"):
                 src.verdict = (
                     "verified_partial" if row.search_confirmed and relevant else "unverifiable"
                 )
                 if not row.search_confirmed:
                     notes.append(
-                        f"unconfirmed: {row.url} blocked our reader and was not found in search"
+                        f"blocked: {row.url} blocked the agent's reader and search didn't find "
+                        "it. Open it and confirm it if it's genuine."
                     )
             else:
                 src.verdict = "unverifiable"
@@ -541,6 +632,9 @@ class Verifier:
                     reason=s.reason,
                     verdict=s.verdict,
                     citable=id(s) in citable,
+                    confirmed_by=s.confirmed[0] if s.confirmed else None,
+                    confirmed_at=s.confirmed[1] if s.confirmed else None,
+                    confirmed_title=s.confirmed[2] if s.confirmed else None,
                 )
             )
         group.sufficient = sufficient

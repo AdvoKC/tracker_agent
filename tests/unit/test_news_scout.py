@@ -132,11 +132,12 @@ def test_accepts_valid_and_rejects_each_bad_case(baselined: Session, app_cfg: Ap
 
 def test_rotation_and_batching(baselined: Session, app_cfg: AppConfig) -> None:
     llm = FakeLLM(default={"results": []})
+    batch = app_cfg.tunables.news.batch_size
     res = scout(baselined, llm, app_cfg, max_calls=2)
-    assert res.calls == 2 and res.searched == 20
+    assert res.calls == 2 and res.searched == 2 * batch
     first = set(baselined.scalars(select(NewsSearchState.promise_id)))
-    assert len(first) == 20
-    # next run: the 20 searched promises go to the back of the queue
+    assert len(first) == 2 * batch
+    # next run: the searched promises go to the back of the queue
     nxt = select_candidates(baselined, 10, NOW.date(), app_cfg.tunables.news)
     assert len(nxt) == 10
     assert not {c.promise_id for c in nxt} & first
@@ -227,3 +228,50 @@ def test_grounded_item_records_search_title(baselined: Session, app_cfg: AppConf
     assert res.accepted == 1
     stored = baselined.scalars(select(NewsItem)).one()
     assert stored.search_grounded is True and stored.search_title
+
+
+# ------------------------------------------------------------------ per-meter context (P10)
+
+
+def test_batches_are_single_meter_and_keep_rotation_order() -> None:
+    from promise_monitor.agents.news_scout import Candidate, meter_batches
+
+    a, b = uuid.uuid4(), uuid.uuid4()
+    cands = [
+        Candidate(uuid.uuid4(), m, "M", f"t{i}", "kept", NOW.date())
+        for i, m in enumerate([a, b, a, a, b])
+    ]
+    batches = meter_batches(cands, 2, 10)
+    assert [[c.meter_id for c in bt] for bt in batches] == [[a, a], [b, b], [a]]
+    assert len(meter_batches(cands, 2, 2)) == 2
+
+
+def test_meter_context_and_extra_outlets(baselined: Session, app_cfg: AppConfig) -> None:
+    from promise_monitor.agents.news_scout import meter_context
+    from promise_monitor.db.models import Meter, MeterSettings
+    from tests.unit.test_monitor import METER_ID
+
+    baselined.add(
+        MeterSettings(
+            meter_id=METER_ID,
+            official_aliases=["President Bola Ahmed Tinubu", "Asiwaju"],
+            search_terms=["Renewed Hope"],
+            exclude_terms=["APC primaries"],
+            extra_outlets=[{"domain": "kanofocus.com", "name": "Kano Focus"}],
+        )
+    )
+    baselined.flush()
+    text, srcs = meter_context(baselined, METER_ID, app_cfg.news_sources)
+    meter = baselined.get(Meter, METER_ID)
+    assert meter is not None and meter.name in text
+    assert "Asiwaju" in text and "Renewed Hope" in text and "APC primaries" in text
+    assert "All 53 promises on this meter" in text
+    assert allowed_outlet("https://kanofocus.com/a", srcs) == "Kano Focus"
+    assert allowed_outlet("https://kanofocus.com/a", app_cfg.news_sources) is None  # meter-only
+
+    llm = FakeLLM({"search_queries": ["q"], "results": [item(url="https://kanofocus.com/story-1")]})
+    res = scout(baselined, llm, app_cfg)
+    assert res.accepted == 1  # extra outlet honoured for THIS meter
+    req = llm.requests[0]
+    assert "kanofocus.com" in req.system and "Asiwaju" in req.user
+    assert "Promises to search now" in req.user

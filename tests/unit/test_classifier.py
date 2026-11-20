@@ -15,7 +15,7 @@ from promise_monitor.agents.classifier import (
 )
 from promise_monitor.agents.monitor import MonitorResult
 from promise_monitor.config import AppConfig, ClassifierConfig, load_app_config
-from promise_monitor.db.models import Meter, NewsItem, Run
+from promise_monitor.db.models import Meter, NewsItem, PtSubmission, Run
 from promise_monitor.llm.base import LLMError
 from tests.conftest import REPO_ROOT
 from tests.fakes import FakeLLM
@@ -254,3 +254,66 @@ def test_news_update_is_evidence_lead_and_deduped_by_url(
     assert ev.state == "queued"
     again = pipe.classify(FakeLLM(), news=[f])
     assert again.events == [] and again.duplicates_skipped == 1
+
+
+# ----------------------------------------------------------------------------- P12 own updates
+
+
+def _submitted(session: Session, pid: str, *, update_id: str | None, text: str) -> None:
+    session.add(
+        PtSubmission(
+            article_id=uuid.uuid4(),
+            meter_id=METER_ID,
+            promise_id=uuid.UUID(pid),
+            submitted_by=uuid.uuid4(),
+            token_row_id=1,
+            payload_sha256="0" * 64,
+            body_text=text,
+            remote_id=uuid.uuid4().hex,
+            remote_state="published" if update_id else "pending_review",
+            remote_update_id=update_id,
+            submitted_at=T0,
+        )
+    )
+    session.commit()
+
+
+def test_our_published_submission_is_not_new_evidence(
+    pipe: Pipeline, site: FakeSite, session: Session
+) -> None:
+    pid, uid = site.ids()[0], str(uuid.uuid4())
+    _submitted(session, pid, update_id=uid, text="something else entirely")
+    site.add_update(pid, uid, "https://example.org/ours")
+    pipe.monitor()
+    res = pipe.classify(FakeLLM(default={"score_delta": 0, "reason": "ok"}))
+    [ev] = res.events
+    assert ev.change_type == "own_submission" and ev.state == "logged"
+    assert ev.article_group_id is None and not res.groups
+    assert "update id" in ev.score_reason
+    # and it never comes back as evidence
+    pipe.monitor()
+    assert pipe.classify().events == []
+
+
+def test_our_submission_is_recognised_by_text_before_the_poll_sees_it(
+    pipe: Pipeline, site: FakeSite, session: Session
+) -> None:
+    pid, uid = site.ids()[0], str(uuid.uuid4())
+    ours = "Lawmakers passed the ports bill on Tuesday after a second reading in the Senate."
+    _submitted(session, pid, update_id=None, text=ours)
+    site.add_update(pid, uid, "https://example.org/x")
+    site.details[pid]["updates"][-1]["blog"] = f"<p>{ours.replace('Tuesday', 'Tuesday,')}</p>"
+    pipe.monitor()
+    [ev] = pipe.classify(FakeLLM(default={"score_delta": 0, "reason": "ok"})).events
+    assert ev.change_type == "own_submission" and "text" in ev.score_reason
+
+
+def test_someone_elses_evidence_on_the_same_promise_is_still_reported(
+    pipe: Pipeline, site: FakeSite, session: Session
+) -> None:
+    pid = site.ids()[0]
+    _submitted(session, pid, update_id="not-this-one", text="A completely different story.")
+    site.add_update(pid, str(uuid.uuid4()), "https://example.org/theirs")
+    pipe.monitor()
+    [ev] = pipe.classify(FakeLLM(default={"score_delta": 0, "reason": "ok"})).events
+    assert ev.change_type == "new_evidence"

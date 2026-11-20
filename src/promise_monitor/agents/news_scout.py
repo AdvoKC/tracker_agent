@@ -1,5 +1,8 @@
 """News Scout Agent (PRD §3.9): Claude web search for concrete developments on promises.
 
+Each call covers promises of ONE meter and carries that meter's dashboard search context
+(names, aliases, terms, exclusions, extra local outlets) plus the meter's full promise list.
+
 Usage control: promises are searched in batches (``news.batch_size`` per Claude call), at
 most ``news.max_calls_per_run`` calls per run, least-recently-searched first, then meter
 priority. A batch whose call fails is not marked as searched, so it goes first next time.
@@ -32,9 +35,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from promise_monitor.agents.classifier import STATUS_LABELS, NewsFinding
-from promise_monitor.config import NewsConfig, NewsSourcesConfig
+from promise_monitor.config import NewsConfig, NewsSourcesConfig, Outlet
 from promise_monitor.db.models import (
     Meter,
+    MeterSettings,
     NewsItem,
     NewsSearchState,
     PromiseIndex,
@@ -112,7 +116,7 @@ def last_tracker_update(content: dict[str, Any]) -> date | None:
 
 
 def select_candidates(
-    session: Session, limit: int, today: date, cfg: NewsConfig
+    session: Session, limit: int, today: date, cfg: NewsConfig, meter_id: uuid.UUID | None = None
 ) -> list[Candidate]:
     """Present promises on active, baselined meters; least-recently-searched first."""
     rows = session.execute(
@@ -123,6 +127,7 @@ def select_candidates(
             PromiseIndex.present.is_(True),
             Meter.registry_status == "active",
             Meter.baseline_pending.is_(False),
+            *([PromiseIndex.meter_id == meter_id] if meter_id else []),
         )
         .order_by(
             NewsSearchState.last_searched_at.asc().nulls_first(),
@@ -201,6 +206,73 @@ def _parse_date(raw: object) -> date | None:
         return None
 
 
+def meter_batches(
+    candidates: list[Candidate], size: int, max_batches: int
+) -> list[list[Candidate]]:
+    """Split candidates into single-meter batches (≤ ``size``), keeping rotation order:
+    a batch's position is that of its first (least-recently-searched) candidate."""
+    by_meter: dict[uuid.UUID, list[Candidate]] = {}
+    for c in candidates:
+        by_meter.setdefault(c.meter_id, []).append(c)
+    chunks: list[tuple[int, list[Candidate]]] = []
+    order = {id(c): i for i, c in enumerate(candidates)}
+    for group in by_meter.values():
+        for k in range(0, len(group), size):
+            chunk = group[k : k + size]
+            chunks.append((order[id(chunk[0])], chunk))
+    chunks.sort(key=lambda t: t[0])
+    return [chunk for _pos, chunk in chunks[:max_batches]]
+
+
+def meter_context(
+    session: Session, meter_id: uuid.UUID, sources: NewsSourcesConfig
+) -> tuple[str, NewsSourcesConfig]:
+    """The meter's dashboard search context + its full promise list (context for the
+    model), and the outlet allowlist for this meter (global + meter extras)."""
+    meter = session.get(Meter, meter_id)
+    assert meter is not None
+    st = session.get(MeterSettings, meter_id)
+    aliases = list(st.official_aliases) if st else []
+    terms = list(st.search_terms) if st else []
+    exclude = list(st.exclude_terms) if st else []
+    extra = [Outlet(domain=o["domain"], name=o["name"]) for o in (st.extra_outlets if st else [])]
+    place = {
+        "presidential": "Federal Government of Nigeria",
+        "senate": "Nigerian Senate",
+        "house": "Nigerian House of Representatives",
+    }.get(meter.scope, f"{meter.state_name} State, Nigeria")
+    titles = [
+        str(c.get("title", ""))[:120]
+        for c in session.scalars(
+            select(PromiseSnapshot.content)
+            .join(PromiseIndex, PromiseIndex.latest_snapshot_id == PromiseSnapshot.snapshot_id)
+            .where(PromiseIndex.meter_id == meter_id, PromiseIndex.present.is_(True))
+        )
+    ]
+    lines = [f"{meter.name} ({place})"]
+    if aliases:
+        lines.append("Also referred to as: " + "; ".join(aliases))
+    if terms:
+        lines.append("Useful search terms for this meter: " + "; ".join(terms))
+    if exclude:
+        lines.append("Exclude results about: " + "; ".join(exclude))
+    if extra:
+        lines.append(
+            "Local outlets for this meter: " + "; ".join(f"{o.name} ({o.domain})" for o in extra)
+        )
+    lines.append(
+        f"All {len(titles)} promises on this meter (context only, to tell them apart; "
+        "search ONLY the promises listed below under 'Promises to search now'):"
+    )
+    lines += [f"  - {t}" for t in titles[:120]]
+    known = {o.domain for o in sources.outlets}
+    meter_sources = NewsSourcesConfig(
+        outlets=(*sources.outlets, *(o for o in extra if o.domain not in known)),
+        official_suffixes=sources.official_suffixes,
+    )
+    return "\n".join(lines), meter_sources
+
+
 def run_news_scout(
     session: Session,
     llm: LLMClient,
@@ -210,24 +282,29 @@ def run_news_scout(
     cfg: NewsConfig,
     sources: NewsSourcesConfig,
     max_calls: int | None = None,
+    meter_id: uuid.UUID | None = None,
 ) -> ScoutResult:
     """Search news for the next batch of promises. Caller owns the transaction."""
     result = ScoutResult()
     calls = cfg.max_calls_per_run if max_calls is None else max_calls
     today = now.date()
-    candidates = select_candidates(session, calls * cfg.batch_size, today, cfg)
+    candidates = select_candidates(session, calls * cfg.batch_size, today, cfg, meter_id)
     if not candidates:
         return result
     prompt = load_prompt("news_scout")
-    domains = allowed_domains_text(sources)
+    contexts: dict[uuid.UUID, tuple[str, NewsSourcesConfig]] = {}
 
-    for start in range(0, len(candidates), cfg.batch_size):
-        batch = candidates[start : start + cfg.batch_size]
+    for n, batch in enumerate(meter_batches(candidates, cfg.batch_size, calls)):
+        meter_id = batch[0].meter_id
+        if meter_id not in contexts:
+            contexts[meter_id] = meter_context(session, meter_id, sources)
+        context_text, meter_sources = contexts[meter_id]
         refs = {f"P{i + 1}": c for i, c in enumerate(batch)}
         system, user = prompt.render(
-            allowed_domains=domains,
+            allowed_domains=allowed_domains_text(meter_sources),
             max_per_promise=str(cfg.max_results_per_promise),
             today=today.isoformat(),
+            meter_context=context_text,
             promises=_promise_block(refs),
         )
         result.calls += 1
@@ -240,7 +317,7 @@ def run_news_scout(
                     user=user,
                     schema=RESULT_SCHEMA,
                     tools=("WebSearch",),
-                    subject_id=f"batch:{start // cfg.batch_size}",
+                    subject_id=f"meter:{meter_id}:batch:{n}",
                 )
             )
         except LLMAuthError as exc:
@@ -257,7 +334,7 @@ def run_news_scout(
             u: h.title for h in resp.search_hits if (u := normalize_url(h.url)) is not None
         }
         _store_results(
-            session, resp.output, refs, run_id, now, cfg, sources, today, result, grounding
+            session, resp.output, refs, run_id, now, cfg, meter_sources, today, result, grounding
         )
         for c in batch:
             state = session.get(NewsSearchState, c.promise_id)

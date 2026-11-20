@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -187,7 +187,7 @@ def test_blocked_source_not_in_search_is_unverifiable(
     assert res.needs_sources == 1
     assert verdicts(session, gid)[EVIDENCE] == ("required", "unverifiable")
     group = session.get(ArticleGroup, gid)
-    assert group is not None and any("unconfirmed" in n for n in group.notes)
+    assert group is not None and any(n.startswith("blocked:") for n in group.notes)
 
 
 def test_low_relevance_is_unverifiable(
@@ -363,3 +363,63 @@ def test_negative_search_result_is_cached(
     session.flush()
     res = v.run()
     assert res.needs_sources == 1 and res.llm_calls == 0
+
+
+def test_relevance_judge_sees_the_promise_tracker_update_text(
+    session: Session,
+    site: FakeSite,
+    app_cfg: AppConfig,
+) -> None:
+    # A blocked page leaves the judge only a title; the published update that cites it
+    # is what links the article to the promise, so the judge must see that text.
+    queue_status_and_evidence(session, site, app_cfg)
+    llm = FakeLLM(
+        {"searched": True, "queries": ["q"], "__search_hits__": [EVIDENCE]}, relevant("S1")
+    )
+    verifier(session, FakeFetcher({EVIDENCE: blocked(EVIDENCE)}), llm, app_cfg).run()
+    judge = llm.requests[-1]
+    assert "New evidence report" in judge.user
+
+
+def test_search_hit_with_same_host_and_slug_confirms(
+    session: Session,
+    site: FakeSite,
+    app_cfg: AppConfig,
+) -> None:
+    gid = queue_news(session, site, app_cfg, NEWS, date(2026, 11, 16), grounded=False)
+    amp = "https://www.channelstv.com/2026/11/16/fg-begins-port-modernisation/amp/"
+    other = "https://evil.example/2026/11/16/fg-begins-port-modernisation"
+    llm = FakeLLM(
+        {"searched": True, "queries": ["q"], "__search_hits__": [other, amp]}, relevant("S1")
+    )
+    verifier(session, FakeFetcher({NEWS: blocked(NEWS)}), llm, app_cfg).run()
+    assert verdicts(session, gid)[NEWS] == ("required", "verified_partial")
+
+
+def test_negative_search_result_is_retried_after_a_day(
+    session: Session,
+    site: FakeSite,
+    app_cfg: AppConfig,
+) -> None:
+    queue_status_and_evidence(session, site, app_cfg)
+    fetcher = FakeFetcher({EVIDENCE: blocked(EVIDENCE)})
+    llm = FakeLLM({"searched": True, "queries": ["q"], "__search_hits__": []})
+    verifier(session, fetcher, llm, app_cfg).run()
+    group = session.scalars(select(ArticleGroup)).one()
+    group.state = "queued"
+    for ev in session.scalars(
+        select(ChangeEvent).where(ChangeEvent.article_group_id == group.group_id)
+    ):
+        ev.state = "queued"
+    session.flush()
+    later = Verifier(
+        session,
+        fetcher,
+        FakeLLM(
+            {"searched": True, "queries": ["q"], "__search_hits__": [EVIDENCE]}, relevant("S1")
+        ),
+        cfg=app_cfg.tunables.verifier,
+        public_promise_url=app_cfg.tunables.api.public_promise_url,
+        now=NOW + timedelta(days=2),
+    )
+    assert later.run().verified == 1

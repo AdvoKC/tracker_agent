@@ -1,0 +1,55 @@
+{% extends "base.html" %}{% from "_macros.html" import state, icon, empty %}
+{% block title %}Overview{% endblock %}
+{% block content %}
+<header class="page-head hero">
+  <div>
+    <p class="eyebrow">Overview</p>
+    <h1>Welcome back, {{ user.name.split(' ')[0] }}</h1>
+    <p class="sub">{% if user.role != 'superadmin' %}Showing your meters only. {% endif %}Daily run at 08:00 WAT.</p>
+  </div>
+  {% if shadow %}<div class="callout info compact">{{ icon('alert') }}<div><strong>Shadow mode</strong><br><span class="small">Approvals are held; nothing is published yet.</span></div></div>{% endif %}
+</header>
+
+<div class="kpis">
+  <a class="kpi accent" href="/review">{{ icon('review', 'i kpi-i') }}<div class="n">{{ open_articles }}</div><div class="l">drafts to review</div></a>
+  <a class="kpi {{ 'warn' if attention }}" href="/review?state=needs_attention">{{ icon('alert', 'i kpi-i') }}<div class="n">{{ attention }}</div><div class="l">need attention (failed QA)</div></a>
+  <a class="kpi {{ 'warn' if leads }}" href="/review">{{ icon('lead', 'i kpi-i') }}<div class="n">{{ leads }}</div><div class="l">evidence leads (sources to check)</div></a>
+  <a class="kpi" href="/review?state=approved">{{ icon('check', 'i kpi-i') }}<div class="n">{{ approved }}</div><div class="l">approved{{ ' (held)' if shadow }}</div></a>
+</div>
+
+<div class="grid2">
+  <section class="card">
+    <h2>{{ icon('updates', 'i sm') }} Changes detected <span class="hint">last 7 days</span></h2>
+    {% if events_week %}{% set mx = events_week.values()|max %}
+    <ul class="bars">{% for k, v in events_week|dictsort %}<li><a href="/updates?type={{ k }}"><span class="bl">{{ k|replace('_',' ') }}</span><span class="bt"><meter min="0" max="{{ mx }}" value="{{ v }}">{{ v }}</meter></span><span class="bn">{{ v }}</span></a></li>{% endfor %}</ul>
+    {% else %}{{ empty('No changes detected this week.') }}{% endif %}
+  </section>
+  <section class="card">
+    <h2>{{ icon('searches', 'i sm') }} News Scout <span class="hint">last 7 days</span></h2>
+    {% if news_week %}{% set mx = news_week.values()|max %}
+    <ul class="bars">{% for k, v in news_week|dictsort %}<li><a href="/searches?state={{ k }}"><span class="bl">{{ k }}</span><span class="bt"><meter min="0" max="{{ mx }}" value="{{ v }}">{{ v }}</meter></span><span class="bn">{{ v }}</span></a></li>{% endfor %}</ul>
+    {% else %}{{ empty('No search results yet.', 'searches') }}{% endif %}
+  </section>
+</div>
+
+{% if user.role == 'superadmin' %}
+<div class="grid2">
+  <section class="card">
+    <h2>{{ icon('runs', 'i sm') }} Latest daily runs</h2>
+    {% if runs %}<ul class="list">
+    {% for r in runs %}<li><a href="/admin/runs/{{ r.run_id }}">{{ local(r.started_at) }}</a>{{ state(r.status) }}</li>{% endfor %}
+    </ul>{% else %}{{ empty('No daily run yet. The timer runs at 08:00 WAT, or start one below.', 'runs') }}{% endif %}
+    {% if last_errors %}<div class="callout warn compact">{{ icon('alert') }}<div><strong>Last run: stage errors</strong><ul class="issues">{% for k, v in last_errors.items() %}<li>{{ k }}: {{ v }}</li>{% endfor %}</ul></div></div>{% endif %}
+    {% if last_warnings %}<details class="hint-box"><summary>Last run: {{ last_warnings|length }} warning(s)</summary><ul class="plain small">{% for w in last_warnings %}<li>{{ w }}</li>{% endfor %}</ul></details>{% endif %}
+    <form method="post" action="/admin/jobs" class="actions"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="kind" value="run"><input type="hidden" name="back" value="/overview"><button type="submit" data-confirm="Start the full daily pipeline now? It takes several minutes and uses Claude quota.">{{ icon('jobs', 'i sm') }}Run the pipeline now</button></form>
+  </section>
+  <section class="card">
+    <h2>{{ icon('llm', 'i sm') }} Claude usage <span class="hint">last 7 days</span></h2>
+    <p class="big-num">${{ '%.2f'|format(cost_total) }} <span class="muted small">equivalent</span></p>
+    <ul class="list small">{% for k, v in cost|dictsort %}<li><span>{{ k }}</span><span>${{ '%.2f'|format(v or 0) }}</span></li>{% endfor %}</ul>
+    <h2>Recent jobs</h2>
+    {% if jobs %}<ul class="list small">{% for j in jobs %}<li><a href="/admin/jobs/{{ j.job_id }}">{{ j.kind|replace('_',' ') }}</a><span>{{ state(j.state) }} <span class="muted">{{ local(j.created_at) }}</span></span></li>{% endfor %}</ul>{% else %}<p class="muted small">None.</p>{% endif %}
+  </section>
+</div>
+{% endif %}
+{% endblock %}

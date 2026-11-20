@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% from "_macros.html" import state, meter_select %}
+{% block title %}Updates{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>Updates</h1>
+<p class="sub">Every change the monitor and the News Scout detected, newest first (last 300).</p></div></header>
+<form class="filters" method="get">
+  {{ meter_select(meter_options, meter_q) }}
+  <select name="type" aria-label="Type"><option value="">All types</option>{% for t in types %}<option value="{{ t }}" {{ 'selected' if type_q == t }}>{{ t|replace('_',' ') }}</option>{% endfor %}</select>
+  <select name="state" aria-label="State"><option value="">All states</option>{% for t in ['logged','queued','needs_sources','drafted','in_review','approved','rejected','stale','published'] %}<option value="{{ t }}" {{ 'selected' if state_q == t }}>{{ t|replace('_',' ') }}</option>{% endfor %}</select>
+  <button class="ghost" type="submit">Filter</button>
+</form>
+<div class="scroll"><table>
+<thead><tr><th>Detected</th><th>Change</th><th>Promise</th><th>Meter</th><th>Score</th><th>Why</th><th>State</th></tr></thead>
+<tbody>
+{% for e in events %}
+<tr>
+  <td class="small">{{ local(e.detected_at) }}</td>
+  <td>{{ e.change_type|replace('_',' ') }}{% if e.old_status or e.new_status %}<div class="muted small">{{ e.old_status or '' }} → {{ e.new_status or '' }}</div>{% endif %}</td>
+  <td class="small"><a href="/promises/{{ e.promise_id }}">{{ titles.get(e.promise_id, '')[:90] }}</a></td>
+  <td class="small">{{ meters[e.meter_id].name if e.meter_id in meters }}</td>
+  <td>{{ e.score }}</td>
+  <td class="small">{{ e.score_reason[:120] }}</td>
+  <td>{{ state(e.state) }}{% if e.article_group_id in articles %} <a class="small" href="/review/articles/{{ articles[e.article_group_id] }}">draft</a>{% elif e.state == 'needs_sources' %} <a class="small" href="/review/leads/{{ e.article_group_id }}">lead</a>{% endif %}</td>
+</tr>
+{% else %}<tr><td colspan="7" class="muted">No changes yet.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}

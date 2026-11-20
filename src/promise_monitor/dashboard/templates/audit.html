@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Audit log{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>Audit log</h1>
+<p class="sub">Every change made in this dashboard, newest first (last 300).</p></div></header>
+<div class="scroll"><table>
+  <thead><tr><th>When (WAT)</th><th>Who</th><th>Action</th><th>On</th><th>Before</th><th>After</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td class="small">{{ r.when }}</td><td class="small">{{ r.who }}</td><td>{{ r.action }}</td><td class="small">{{ r.on }}</td>
+    <td><pre class="json">{{ r.before }}</pre></td><td><pre class="json">{{ r.after }}</pre></td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="muted">Nothing yet.</td></tr>{% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}

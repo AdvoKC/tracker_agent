@@ -17,17 +17,16 @@ PDF = (
 )
 VOTES = "https://example.org/illustrative/votes-and-proceedings"
 
-HEADLINE = "CAMA amendment bill on civil society barriers passes second reading in House"
+HEADLINE = "CAMA Amendment Bill on Civil Society Barriers Passes Second Reading"
+CLOSER = "is rated, \u2018IN THE WORKS.\u2019"
 BODY = (
-    "The House of Representatives' promise to review the Companies and Allied Matters Act "
-    "(CAMA) to remove barriers facing civil society organisations has gained new evidence on "
-    "Promise Tracker. Its status remains In the Works. According to the "
+    "The House of Representatives has advanced its promise to review the Companies and Allied "
+    "Matters Act (CAMA) to remove barriers facing civil society organisations. According to the "
     f"[House Votes and Proceedings of 12 November 2026]({VOTES}), the CAMA (Amendment) Bill, "
     "HB 659, passed second reading and was referred to the Committee on Commerce for further "
     "legislative action. The commitment comes from the "
     f"[Legislative Agenda of the 10th House]({PDF}). The committee has not yet submitted its "
-    "report to plenary. The full evidence timeline is on the "
-    f"[Promise Tracker page for this promise]({PROMISE})."
+    f"report to plenary. [This promise]({PROMISE}) {CLOSER}"
 )
 
 
@@ -41,8 +40,8 @@ def ctx() -> QAContext:
         old_status=None,
         has_status_change=False,
         banned_terms=cfg.banned_terms,
-        min_words=95,
-        max_words=105,
+        min_words=60,
+        max_words=100,
     )
 
 
@@ -50,10 +49,10 @@ def issues(ctx: QAContext, body: str = BODY, headline: str = HEADLINE) -> list[s
     return check_article(headline, body, ctx).issues
 
 
-def test_prd_sample_article_passes(ctx: QAContext) -> None:
+def test_house_style_sample_passes(ctx: QAContext) -> None:
     rep = check_article(HEADLINE, BODY, ctx)
     assert rep.issues == []
-    assert rep.word_count == 100
+    assert rep.word_count == 84
     assert len(rep.links) == 3
 
 
@@ -62,7 +61,7 @@ def test_word_count_rules() -> None:
     assert word_count("see https://a.ng/x") == 2  # bare URLs would count, but are flagged elsewhere
 
 
-@pytest.mark.parametrize("extra", [" Extra words added here to push it over the maximum."])
+@pytest.mark.parametrize("extra", [" " + " ".join(["More"] * 20) + "."])
 def test_too_long(ctx: QAContext, extra: str) -> None:
     assert any(i.startswith("word_count") for i in issues(ctx, BODY + extra))
 
@@ -109,9 +108,7 @@ def test_vague_anchor_rejected(ctx: QAContext) -> None:
 
 
 def test_promise_page_required(ctx: QAContext) -> None:
-    body = BODY.replace(
-        f"[Promise Tracker page for this promise]({PROMISE})", "Promise Tracker page"
-    )
+    body = BODY.replace(f"[This promise]({PROMISE})", "This promise")
     assert any("promise page" in i for i in issues(ctx, body))
 
 
@@ -126,7 +123,7 @@ def test_bare_url_rejected(ctx: QAContext) -> None:
 
 
 def test_wrong_status_label(ctx: QAContext) -> None:
-    body = BODY.replace("Its status remains In the Works.", "Its status remains Stalled.")
+    body = BODY.replace(CLOSER, "is rated, \u2018STALLED.\u2019")
     found = issues(ctx, body)
     assert any("Stalled" in i for i in found)
     assert any("current Promise Tracker rating" in i for i in found)
@@ -134,15 +131,14 @@ def test_wrong_status_label(ctx: QAContext) -> None:
 
 def test_status_change_labels_allowed(ctx: QAContext) -> None:
     c = replace(ctx, current_status="kept", old_status="in_the_works", has_status_change=True)
-    body = BODY.replace(
-        "Its status remains In the Works.", "Its status moved from In the Works to Kept."
-    )
+    body = BODY.replace(CLOSER, "is now rated, \u2018KEPT.\u2019")
     assert issues(c, body) == []
 
 
 def test_news_update_must_not_imply_rating_change(ctx: QAContext) -> None:
-    body = BODY.replace("Its status remains In the Works.", "It is now rated In the Works.")
-    assert any("rating did not change" in i for i in issues(ctx, body))
+    body = BODY.replace(CLOSER, "is now rated, \u2018IN THE WORKS.\u2019")
+    found = issues(ctx, body)
+    assert any("rating did not change" in i for i in found)
 
 
 def test_banned_term(ctx: QAContext) -> None:
@@ -165,3 +161,37 @@ def test_near_duplicate_rejected(ctx: QAContext) -> None:
     c = replace(ctx, recent_bodies=(BODY.replace("12 November", "13 November"),))
     assert any(i.startswith("dedupe") for i in issues(c))
     assert cosine(BODY, "Something entirely different about roads in Kano.") < 0.3
+
+
+# ----------------------------------------------------------------------------- house style
+
+
+def test_house_closer_required(ctx: QAContext) -> None:
+    body = BODY.replace(
+        f"[This promise]({PROMISE}) {CLOSER}", f"See the [promise page here]({PROMISE})."
+    )
+    assert any(i.startswith("house style: the body must end") for i in issues(ctx, body))
+
+
+def test_house_closer_accepts_quote_variants(ctx: QAContext) -> None:
+    for closer in (
+        'is rated "IN THE WORKS."',
+        "is rated, 'In the Works.'",
+        "is rated \u201cIN THE WORKS\u201d.",
+    ):
+        assert issues(ctx, BODY.replace(CLOSER, closer)) == [], closer
+
+
+def test_platform_name_not_used(ctx: QAContext) -> None:
+    body = BODY.replace(
+        "The committee has not yet", "On Promise Tracker, the committee has not yet"
+    )
+    assert any("Promise Tracker" in i for i in issues(ctx, body))
+
+
+def test_never_more_than_100_words(ctx: QAContext) -> None:
+    padding = " ".join(["Additional"] * 17) + "."
+    body = BODY.replace("[This promise]", f"{padding} [This promise]")
+    rep = check_article(HEADLINE, body, ctx)
+    assert rep.word_count == 101
+    assert any(i.startswith("word_count") for i in rep.issues)

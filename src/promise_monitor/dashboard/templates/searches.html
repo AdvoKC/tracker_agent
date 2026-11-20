@@ -1,0 +1,42 @@
+{% extends "base.html" %}{% from "_macros.html" import state, meter_select %}
+{% block title %}Searches{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>News searches</h1>
+<p class="sub">What the News Scout searched and what it found. Results are checked in code: allowlisted outlet, found in real search results, full date after the promise's last update, concrete development, relevance.</p></div></header>
+<form class="filters" method="get">
+  {{ meter_select(meter_options, meter_q) }}
+  <select name="state" aria-label="Result"><option value="">All results</option><option value="accepted" {{ 'selected' if state_q == 'accepted' }}>Accepted</option><option value="rejected" {{ 'selected' if state_q == 'rejected' }}>Rejected</option></select>
+  <button class="ghost" type="submit">Filter</button>
+</form>
+<p class="small">{% for r, n in reasons.most_common() %}<span class="pill">{{ r|replace('_',' ') }}: {{ n }}</span> {% endfor %}</p>
+<h2 class="section">Results <span class="count">{{ items|length }}</span></h2>
+<div class="scroll"><table>
+<thead><tr><th>Found</th><th>Article</th><th>Promise</th><th>Published</th><th>Relevance</th><th>Outcome</th></tr></thead>
+<tbody>
+{% for i in items %}
+<tr>
+  <td class="small">{{ local(i.found_at) }}</td>
+  <td><a href="{{ i.url }}" rel="noopener noreferrer">{{ i.headline[:110] }}</a><div class="muted small">{{ i.outlet }}{% if i.search_grounded %} · in search results{% endif %}{% if i.development_type %} · {{ i.development_type }}{% endif %}</div><div class="small">{{ i.summary[:220] }}</div></td>
+  <td class="small"><a href="/promises/{{ i.promise_id }}">{{ titles.get(i.promise_id, '')[:70] }}</a><div class="muted">{{ meters[i.meter_id].name if i.meter_id in meters }}</div></td>
+  <td class="small">{{ i.published_date or '?' }}</td>
+  <td>{{ '%.2f'|format(i.relevance) }}</td>
+  <td>{{ state(i.state) }}{% if i.reject_reason %}<div class="muted small">{{ i.reject_reason|replace('_',' ') }}</div>{% endif %}</td>
+</tr>
+{% else %}<tr><td colspan="6" class="muted">No results yet.</td></tr>{% endfor %}
+</tbody></table></div>
+<h2 class="section">Search calls <span class="count">{{ calls|length }}</span></h2>
+<div class="scroll"><table>
+<thead><tr><th>When</th><th>Meter</th><th>Queries run</th><th>Results returned</th><th>Cost</th><th>OK</th></tr></thead>
+<tbody>
+{% for c in calls %}
+<tr>
+  <td class="small">{{ local(c.call.created_at) }}</td>
+  <td class="small">{{ meters[c.meter_id].name if c.meter_id in meters else '-' }}</td>
+  <td class="small">{% for q in c.queries %}<div>“{{ q }}”</div>{% else %}<span class="muted">not recorded</span>{% endfor %}</td>
+  <td>{{ c.results }}</td>
+  <td class="small">${{ '%.3f'|format(c.call.cost_usd or 0) }}</td>
+  <td>{{ state('ok' if c.call.ok else 'failed') }}{% if c.call.error %}<div class="muted small">{{ c.call.error[:120] }}</div>{% endif %}</td>
+</tr>
+{% else %}<tr><td colspan="6" class="muted">No searches yet.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}

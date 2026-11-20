@@ -1,0 +1,16 @@
+{% extends "base.html" %}{% from "_macros.html" import state %}
+{% block title %}Run{% endblock %}
+{% block content %}
+<a class="crumb" href="/admin/runs">Runs</a>
+<header class="page-head"><div><h1>Run {{ local(run.started_at) }}</h1>
+<p class="sub">{{ state(run.status) }} · {{ run.trigger }}{% if run.finished_at %} · finished {{ local(run.finished_at) }}{% endif %} · Claude ${{ '%.2f'|format(cost) }}</p></div></header>
+{% set st = run.stats or {} %}
+{% if st.get('stage_errors') %}<div class="card"><h2>Stage errors</h2><ul class="issues">{% for k, v in st['stage_errors'].items() %}<li>{{ k }}: {{ v }}</li>{% endfor %}</ul></div>{% endif %}
+{% if st.get('warnings') %}<div class="card"><h2>Warnings</h2><ul class="plain small">{% for w in st['warnings'] %}<li>{{ w }}</li>{% endfor %}</ul></div>{% endif %}
+<div class="grid2">
+<section class="card"><h2>Stats</h2><pre class="out">{{ stats }}</pre></section>
+<section class="card"><h2 class="section">Claude calls <span class="count">{{ calls|length }}</span></h2>
+<table class="tight"><tbody>{% for c in calls %}<tr><td class="small">{{ local(c.created_at, '%H:%M:%S') }}</td><td class="small">{{ c.agent }}</td><td class="small">{{ c.model or '' }}</td><td class="small">${{ '%.3f'|format(c.cost_usd or 0) }}</td><td>{{ state('ok' if c.ok else 'failed') }}</td></tr>{% else %}<tr><td class="muted">None.</td></tr>{% endfor %}</tbody></table>
+</section>
+</div>
+{% endblock %}

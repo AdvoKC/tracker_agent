@@ -65,6 +65,7 @@ class Meter(Base):
     list_endpoint: Mapped[str] = mapped_column(Text)
     public_url: Mapped[str] = mapped_column(Text)
     coordinator_email: Mapped[str | None] = mapped_column(String(255))
+    coordinator_name: Mapped[str | None] = mapped_column(String(255))
     promise_count: Mapped[int] = mapped_column(Integer, default=0)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -139,6 +140,8 @@ CHANGE_TYPES = (
     "cosmetic",
     "substantive_edit",
     "promise_removed",
+    "coordinator_update",
+    "own_submission",  # our own update, published by Promise Tracker (§8d): never reported
 )
 EVENT_STATES = (
     "logged",
@@ -151,7 +154,13 @@ EVENT_STATES = (
     "stale",
     "published",
 )
-ARTICLE_TYPES = ("status_change", "new_evidence", "new_promise", "news_update")
+ARTICLE_TYPES = (
+    "status_change",
+    "new_evidence",
+    "new_promise",
+    "news_update",
+    "coordinator_update",
+)
 
 
 class ChangeEvent(Base):
@@ -190,6 +199,10 @@ class ChangeEvent(Base):
     dedupe_key: Mapped[str] = mapped_column(String(64), unique=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     state: Mapped[str] = mapped_column(String(16), index=True)
+    # coordinator_update only: the coordinator's description, their source links, who asked.
+    brief: Mapped[str | None] = mapped_column(Text)
+    brief_urls: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.user_id"))
 
 
 class LLMCall(Base):
@@ -304,6 +317,7 @@ class ArticleGroup(Base):
     notes: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # lead row in Sheet
 
 
 VERDICTS = ("verified", "verified_partial", "unverifiable", "broken")
@@ -332,6 +346,10 @@ class ArticleGroupSource(Base):
     reason: Mapped[str | None] = mapped_column(Text)
     verdict: Mapped[str] = mapped_column(String(20))
     citable: Mapped[bool] = mapped_column(Boolean)
+    # A coordinator opened a page that blocked the agent and confirmed it (kept on re-verify).
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.user_id"))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_title: Mapped[str | None] = mapped_column(Text)  # headline as the coordinator saw it
 
 
 ARTICLE_STATES = ("in_review", "needs_attention", "approved", "rejected", "stale", "published")
@@ -364,4 +382,167 @@ class Article(Base):
     approved_by: Mapped[str | None] = mapped_column(String(255))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # row in Sheet
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# --------------------------------------------------------------------------- dashboard (P10)
+
+ROLES = ("superadmin", "coordinator")
+ASSIGNMENT_KINDS = ("primary", "temporary")
+
+
+class User(Base):
+    """Dashboard account. Passwords are scrypt hashes (never stored or logged in clear)."""
+
+    __tablename__ = "users"
+    __table_args__ = (CheckConstraint(_in("role", ROLES), name="role"),)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(255), unique=True)  # stored lowercase
+    name: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(16))
+    password_hash: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MeterAssignment(Base):
+    """Who covers a meter. ``primary`` = the meter's coordinator (one active at a time);
+    ``temporary`` = time-boxed cover (leave, absence) between ``starts_at`` and ``ends_at``."""
+
+    __tablename__ = "meter_assignments"
+    __table_args__ = (
+        CheckConstraint(_in("kind", ASSIGNMENT_KINDS), name="kind"),
+        CheckConstraint("kind = 'primary' OR ends_at IS NOT NULL", name="temporary_has_end"),
+    )
+
+    assignment_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    meter_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("meters.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.user_id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str | None] = mapped_column(Text)
+    granted_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.user_id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.user_id"))
+
+
+class MeterSettings(Base):
+    """Per-meter news-search context (dashboard-edited; read by the News Scout)."""
+
+    __tablename__ = "meter_settings"
+
+    meter_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("meters.id"), primary_key=True)
+    official_aliases: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    search_terms: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    exclude_terms: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    # [{"domain": "...", "name": "..."}] — superadmin-only (editorial balance)
+    extra_outlets: Mapped[list[dict[str, str]]] = mapped_column(JSON_TYPE, default=list)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.user_id"))
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuditLog(Base):
+    """Every dashboard change: who, what, before → after. Append-only."""
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.user_id"))
+    action: Mapped[str] = mapped_column(String(64))
+    entity: Mapped[str] = mapped_column(String(64))
+    entity_id: Mapped[str | None] = mapped_column(String(64))
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
+    after: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
+
+
+class AppSetting(Base):
+    """Dashboard overrides of config/*.yaml (whitelisted keys only, validated, audited)."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)  # e.g. "news.max_calls_per_run"
+    value: Mapped[Any] = mapped_column(JSON_TYPE)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.user_id"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+JOB_STATES = ("queued", "running", "done", "failed", "busy", "lost")
+
+
+class Job(Base):
+    """A background operation started from the dashboard (whitelisted commands only)."""
+
+    __tablename__ = "jobs"
+    __table_args__ = (CheckConstraint(_in("state", JOB_STATES), name="state"),)
+
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(32))
+    target: Mapped[str | None] = mapped_column(String(64))  # meter / group / article id
+    argv: Mapped[list[str]] = mapped_column(JSON_TYPE)
+    state: Mapped[str] = mapped_column(String(16), index=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    output: Mapped[str | None] = mapped_column(Text)  # tail of stdout/stderr
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.user_id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --------------------------------------------------------------------------- submissions (P12)
+
+
+class PtToken(Base):
+    """A coordinator's Promise Tracker submission token (issued by the backend, PRD §8d).
+
+    Only the Fernet ciphertext is stored; the token is never shown again or logged. One active
+    (``revoked_at IS NULL``) token per user; replacing one revokes the old row.
+    """
+
+    __tablename__ = "pt_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.user_id"), index=True)
+    token_ciphertext: Mapped[str] = mapped_column(Text)
+    remote_token_id: Mapped[str] = mapped_column(String(128))  # the backend's id (whoami)
+    last4: Mapped[str] = mapped_column(String(4))
+    meter_ids: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)  # from whoami
+    holder_name: Mapped[str | None] = mapped_column(String(255))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+SUBMISSION_STATES = ("pending_review", "published", "rejected", "withdrawn")
+
+
+class PtSubmission(Base):
+    """One approved article sent to Promise Tracker's review queue. One per article, ever."""
+
+    __tablename__ = "pt_submissions"
+    __table_args__ = (CheckConstraint(_in("remote_state", SUBMISSION_STATES), name="remote_state"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    article_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("articles.article_id"), unique=True
+    )
+    meter_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("meters.id"), index=True)
+    promise_id: Mapped[uuid.UUID] = mapped_column(Uuid, index=True)
+    submitted_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.user_id"))
+    token_row_id: Mapped[int] = mapped_column(Integer, ForeignKey("pt_tokens.id"))
+    payload_sha256: Mapped[str] = mapped_column(String(64))
+    body_text: Mapped[str] = mapped_column(Text)  # plain text we sent (self-update matching)
+    remote_id: Mapped[str] = mapped_column(String(128), unique=True)
+    remote_state: Mapped[str] = mapped_column(String(20), index=True)
+    remote_update_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    reviewer_note: Mapped[str | None] = mapped_column(Text)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)

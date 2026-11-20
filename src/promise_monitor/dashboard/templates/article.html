@@ -1,0 +1,112 @@
+{% extends "base.html" %}{% from "_macros.html" import state, verdict, job_button, back, icon %}
+{% block title %}Review draft{% endblock %}
+{% block content %}
+{{ back('/review', 'Review queue') }}
+<header class="page-head">
+  <div>
+    <h1>{{ a.headline or '(no headline)' }}</h1>
+    <div class="meta">
+      {{ state(a.state) }}
+      <a class="chip" href="/meters/{{ meter.id }}">{{ icon('meters', 'i sm') }}{{ meter.name }}</a>
+      <a class="chip" href="/promises/{{ a.promise_id }}" title="{{ title }}">{{ icon('doc', 'i sm') }}{{ title[:80] }}{{ '…' if title|length > 80 }}</a>
+      <span class="chip">{{ a.word_count }} words</span>
+      <span class="chip">{{ a.rewrite_count }} rewrite(s)</span>
+      <span class="chip muted">created {{ local(a.created_at) }}</span>
+      {% if a.approved_by %}<span class="chip">approved by {{ a.approved_by }} · {{ local(a.approved_at) }}</span>{% endif %}
+    </div>
+  </div>
+</header>
+
+{% if a.qa_flags %}
+<div class="callout warn" role="alert">{{ icon('alert') }}<div><strong>QA issues ({{ a.qa_flags|length }})</strong><ul class="issues">{% for f in a.qa_flags %}<li>{{ f }}</li>{% endfor %}</ul></div></div>
+{% endif %}
+
+<div class="review-grid">
+<section class="card editor-card">
+  {% if open %}
+  <h2>Edit and decide</h2>
+  <form method="post" action="/review/articles/{{ a.article_id }}" data-editor data-min="{{ limits.min_words }}" data-max="{{ limits.max_words }}" data-hmax="{{ limits.max_headline_words }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="field-head"><label for="h">Headline</label><span class="counter" data-count="headline" aria-live="polite"></span></div>
+    <input id="h" type="text" name="headline" value="{{ a.headline }}" maxlength="200">
+    <p class="hint">Max {{ limits.max_headline_words }} words, no ? or !. Follow the meter's capitalisation.</p>
+    <div class="field-head"><label for="b">Body</label><span class="counter" data-count="body" aria-live="polite"></span></div>
+    <div class="wbar" aria-hidden="true"><i></i></div>
+    <textarea id="b" class="body" name="body">{{ a.body_markdown }}</textarea>
+    <details class="hint-box">
+      <summary>House style checklist</summary>
+      <ul class="plain small">
+        <li>{{ limits.min_words }}–{{ limits.max_words }} words; never more than {{ limits.max_words }} (link text counts, URLs don't).</li>
+        <li>At least 2 links as <code>[anchor](url)</code>, using the verified sources below.</li>
+        <li>Ends with <code>[This promise](promise link) is rated, ‘RATING.’</code></li>
+        <li>Actor first, neutral, no evaluative words; never name Promise Tracker.</li>
+      </ul>
+    </details>
+    <label for="n">Note <span class="hint">optional, kept with the decision</span></label>
+    <input id="n" type="text" name="note" maxlength="1000">
+    <div class="decision-bar">
+      <button type="submit" name="action" value="save" class="ghost" title="Ctrl+S">Save &amp; re-check</button>
+      <span class="spacer"></span>
+      <button type="submit" name="action" value="reject" class="danger" data-confirm="Reject this draft? This is final: the change will not be reported.">Reject</button>
+      <button type="submit" name="action" value="approve" class="primary">{{ icon('check', 'i sm') }}Approve</button>
+    </div>
+    <p class="muted small">Approve re-runs every QA check on the text above first. Reject is final: this change won't be reported.</p>
+  </form>
+  {% if user.role == 'superadmin' %}
+  <h2>Operations</h2>
+  <div class="actions">{{ job_button('redraft_article', a.article_id, 'Redraft with Claude', csrf, '/review/articles/' ~ a.article_id, 'Replace this draft with a fresh one from Claude? Unsaved edits are lost.') }}</div>
+  {% endif %}
+  {% else %}
+  <h2>Decided</h2><p>This draft is {{ state(a.state) }} and can no longer be edited.</p>
+  {% if a.decision_note %}<p class="small muted">Note: {{ a.decision_note }}</p>{% endif %}
+  {% if sendable %}
+  <h2>Promise Tracker</h2>
+  {% if submission %}
+  <p>Sent for review {{ local(submission.submitted_at) }}: {{ state(submission.remote_state) }}</p>
+  {% if submission.reviewer_note %}<p class="small muted">Reviewer: {{ submission.reviewer_note }}</p>{% endif %}
+  {% if submission.error %}<p class="small muted">Last status check: {{ submission.error }}</p>{% endif %}
+  {% elif send_blockers %}
+  <p class="muted small">Can't be sent to Promise Tracker yet:</p>
+  <ul class="issues">{% for b in send_blockers %}<li>{{ b }}</li>{% endfor %}</ul>
+  {% else %}
+  <form method="post" action="/review/articles/{{ a.article_id }}/send">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <p class="muted small">Sends this update to Promise Tracker's review queue with your token. Their editors decide whether to publish it.</p>
+    <div class="actions"><button type="submit" class="primary" data-confirm="Send this update to Promise Tracker for review?">Send to Promise Tracker</button></div>
+  </form>
+  {% endif %}
+  {% endif %}
+  {% endif %}
+</section>
+
+<div class="stack">
+  <section class="card preview-card">
+    <h2>Preview <span class="hint">as it will be published</span></h2>
+    <article class="preview">
+      <h3 data-preview-headline>{{ a.headline }}</h3>
+      <div data-preview>{{ preview }}</div>
+    </article>
+  </section>
+  <section class="card">
+    <h2>What changed</h2>
+    <ul class="timeline">{% for c in changes %}<li>{{ c }}</li>{% endfor %}</ul>
+  </section>
+</div>
+</div>
+
+<h2 class="section">Sources <span class="count">{{ sources|length }}</span></h2>
+<div class="scroll"><table>
+<thead><tr><th>Source</th><th>Role</th><th>Fetch</th><th>Verdict</th><th>Relevance</th><th>Why</th></tr></thead>
+<tbody>
+{% for s in sources %}
+<tr>
+  <td><a href="{{ s.url }}" rel="noopener noreferrer" target="_blank">{{ s.title or s.url }}</a><div class="muted small">{{ s.publisher or '' }} {{ s.date or '' }} · <a href="/sources/{{ s.id }}">details</a></div></td>
+  <td class="small">{{ s.role|replace('_',' ') }}</td>
+  <td class="small">{{ s.fetch }}{% if s.http %} ({{ s.http }}){% endif %}{% if s.confirmed %}<div class="muted">confirmed via search</div>{% endif %}</td>
+  <td>{{ verdict(s.verdict) }}{% if s.citable %} <span class="pill st-ok">citable</span>{% endif %}</td>
+  <td>{{ '%.2f'|format(s.conf) if s.conf is not none else '-' }}</td>
+  <td class="small">{{ s.reason or '' }}</td>
+</tr>
+{% else %}<tr><td colspan="6" class="muted">No sources recorded.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}

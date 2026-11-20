@@ -1,0 +1,11 @@
+[Unit]
+Description=AdvoKC Promise Tracker Monitor: every day at 08:00 WAT
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 Africa/Lagos
+# If the machine was off at 08:00, run once at next boot/login.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,80 @@
+{% extends "base.html" %}{% from "_macros.html" import badge, state, icon %}
+{% block title %}Promise{% endblock %}
+{% block content %}
+<a class="crumb" href="/meters/{{ meter.id }}">{{ meter.name }}</a>
+<header class="page-head"><div><h1>{{ p.title or 'Promise' }}</h1>
+<div class="meta">{{ badge(status) }}<span class="chip">{{ p.category or 'no category' }}</span><span class="chip muted">news last searched: {{ searched or 'never' }}</span><a class="chip link" href="{{ url }}" rel="noopener noreferrer" target="_blank">Open on Promise Tracker ↗</a></div></div>
+{% if present %}<a class="button-link" href="#write" data-open="write">{{ icon('doc', 'i sm') }}Write an update</a>{% endif %}
+</header>
+
+{% if present %}
+<details class="card write-card" id="write">
+  <summary><span>{{ icon('doc', 'i sm') }} Write an update for this promise</span><span class="hint">Describe what happened · Claude drafts it in AdvoKC house style</span></summary>
+  <form method="post" action="/promises/{{ pid }}/brief" class="write-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="field-head"><label for="desc">What happened?</label><span class="hint" data-charcount="desc" data-max="{{ brief_limits.max }}"></span></div>
+    <textarea id="desc" name="description" required minlength="{{ brief_limits.min }}" maxlength="{{ brief_limits.max }}" placeholder="e.g. The Federal Government has suspended the Kano-Maradi rail project after funding for 2026 was removed from the budget, according to the Ministry of Transportation."></textarea>
+    <p class="hint">Plain facts: who did what, when, figures and places. Only facts the source links below support will be used.</p>
+    <div class="row">
+      <div>
+        <label for="rating">Rating to report</label>
+        <select id="rating" name="rating">{% for k, v in statuses.items() %}<option value="{{ k }}" {{ 'selected' if k == status }}>{{ v }}{{ ' (current)' if k == status }}</option>{% endfor %}</select>
+      </div>
+      <div class="grow2">
+        <label for="urls">Source links <span class="hint">1-{{ brief_limits.urls }}, one per line</span></label>
+        <textarea id="urls" name="urls" class="urls" required placeholder="https://punchng.com/…"></textarea>
+      </div>
+    </div>
+    <div class="callout info compact">{{ icon('alert') }}<div class="small">The links are checked like any other source (fetched, dated, judged for relevance). If none can be verified, you get an evidence lead instead of a draft. The draft then goes to the review queue for approval as usual. If you pick a different rating, the article reports it as a rating change; update the rating on Promise Tracker too.</div></div>
+    <div class="actions"><button type="submit">{{ icon('check', 'i sm') }}Request the update</button><a href="#updates-requested" class="muted small">see requested updates</a></div>
+  </form>
+</details>
+{% endif %}
+
+{% if briefs %}
+<h2 class="section" id="updates-requested">Updates requested <span class="count">{{ briefs|length }}</span></h2>
+{% if brief_open %}<p class="muted small live" data-poll="6"><span class="spinner" aria-hidden="true"></span> Checking sources and drafting… this list refreshes itself.</p>{% endif %}
+<div class="brief-list">
+{% for b in briefs %}
+  <article class="card brief">
+    <div class="brief-head">
+      {{ badge(b.rating) }}
+      {% if b.article %}<a class="pill st-{{ b.article.state }}" href="/review/articles/{{ b.article.article_id }}">draft: {{ b.article.state|replace('_',' ') }} →</a>
+      {% elif b.group and b.group.state == 'needs_sources' %}<a class="pill st-needs_sources" href="/review/leads/{{ b.group.group_id }}">sources not verified: lead →</a>
+      {% elif b.job and b.job.state in ('queued','running') %}<span class="pill st-running">working</span>
+      {% elif b.job and b.job.state in ('failed','busy','lost') %}<span class="pill st-stale">waiting for the daily run</span>
+      {% else %}<span class="pill st-queued">queued</span>{% endif %}
+      <span class="muted small">{{ b.when }}{% if b.by %} · {{ b.by }}{% endif %}</span>
+    </div>
+    <p class="small">{{ b.text }}</p>
+    <ul class="plain small">{% for u in b.urls %}<li><a href="{{ u }}" rel="noopener noreferrer" target="_blank">{{ u[:100] }}</a></li>{% endfor %}</ul>
+  </article>
+{% endfor %}
+</div>
+{% endif %}
+
+<div class="grid2">
+<section class="card"><h2 class="section">Evidence on Promise Tracker <span class="count">{{ (p.updates or [])|length }}</span></h2>
+  {% for u in (p.updates or [])|reverse %}
+  <div class="small evidence"><strong>{{ (u.created_at or '')[:10] }}</strong>{% if u.status %} · {{ badge(u.status) }}{% endif %}<div>{{ (u.text or '')[:400] }}{% if (u.text or '')|length > 400 %}…{% endif %}</div>
+  {% for l in u.evidence_links or [] %}<div><a href="{{ l }}" rel="noopener noreferrer">{{ l[:90] }}</a></div>{% endfor %}</div>
+  {% else %}<p class="muted">No evidence updates yet.</p>{% endfor %}
+</section>
+<section class="card"><h2>History (snapshots)</h2>
+  <table class="tight"><tbody>{% for h in history %}<tr><td class="small">{{ h.when }}</td><td>{{ badge(h.status) }}</td><td class="small">{{ h.what }}</td></tr>{% endfor %}</tbody></table>
+  {% if p.source_text %}<h2>Source of the promise</h2><p class="small">{{ p.source_text }}</p>{% endif %}
+</section>
+</div>
+<h2 class="section">Detected changes</h2>
+<div class="scroll"><table><thead><tr><th>When</th><th>Change</th><th>Score</th><th>State</th></tr></thead><tbody>
+{% for e in events %}<tr><td class="small">{{ local(e.detected_at) }}</td><td>{{ e.change_type|replace('_',' ') }}{% if e.new_status %} <span class="muted small">{{ e.old_status or '' }} → {{ e.new_status }}</span>{% endif %}</td><td>{{ e.score }}</td><td>{{ state(e.state) }}</td></tr>
+{% else %}<tr><td colspan="4" class="muted">None yet.</td></tr>{% endfor %}</tbody></table></div>
+<h2 class="section">Articles</h2>
+<div class="scroll"><table><thead><tr><th>Headline</th><th>State</th><th>Created</th></tr></thead><tbody>
+{% for a in articles %}<tr><td><a href="/review/articles/{{ a.article_id }}">{{ a.headline }}</a></td><td>{{ state(a.state) }}</td><td class="small">{{ local(a.created_at) }}</td></tr>
+{% else %}<tr><td colspan="3" class="muted">None yet.</td></tr>{% endfor %}</tbody></table></div>
+<h2 class="section">News found</h2>
+<div class="scroll"><table><thead><tr><th>Article</th><th>Published</th><th>Outcome</th></tr></thead><tbody>
+{% for n in news %}<tr><td><a href="{{ n.url }}" rel="noopener noreferrer">{{ n.headline[:110] }}</a><div class="muted small">{{ n.outlet }}</div></td><td class="small">{{ n.published_date or '?' }}</td><td>{{ state(n.state) }}{% if n.reject_reason %} <span class="muted small">{{ n.reject_reason|replace('_',' ') }}</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="3" class="muted">Nothing found yet.</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

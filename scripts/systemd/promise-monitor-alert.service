@@ -1,0 +1,8 @@
+[Unit]
+Description=AdvoKC Promise Tracker Monitor: crash alert email
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/uv run --frozen promise-monitor alert --unit promise-monitor.service

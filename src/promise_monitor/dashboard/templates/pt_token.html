@@ -1,0 +1,61 @@
+{% extends "base.html" %}{% from "_macros.html" import state, icon %}
+{% block title %}Promise Tracker token{% endblock %}
+{% block content %}
+<header class="page-head"><div>
+  <h1>Promise Tracker token</h1>
+  <p class="sub">Lets you send approved updates to Promise Tracker's review queue without signing in there. Promise Tracker's editors still review and publish them.</p>
+</div></header>
+
+{% if not enabled %}<div class="callout warn" role="status">{{ icon('alert') }}<div>Sending is switched off on this server (<code>submissions.enabled</code>). You can still save your token.</div></div>
+{% elif shadow %}<div class="callout warn" role="status">{{ icon('alert') }}<div>Shadow mode: publishing is off, so nothing is sent yet.</div></div>{% endif %}
+
+<div class="grid2">
+<section class="card">
+  <h2>Your token</h2>
+  {% if tok %}
+  <dl class="kv">
+    <dt>Token</dt><dd><code>…{{ tok.last4 }}</code></dd>
+    {% if tok.holder_name %}<dt>Issued to</dt><dd>{{ tok.holder_name }}</dd>{% endif %}
+    <dt>Saved</dt><dd>{{ local(tok.created_at) }}</dd>
+    <dt>Expires</dt><dd>{{ local(tok.expires_at) if tok.expires_at else 'no expiry given' }}</dd>
+  </dl>
+  <h3>Meters it covers</h3>
+  <ul class="plain">
+    {% for c in covered %}<li>{{ c.name }}{% if not c.assigned %} <span class="muted small">(you're not assigned to this meter here, so you can't send for it)</span>{% endif %}</li>
+    {% else %}<li class="muted">None.</li>{% endfor %}
+  </ul>
+  <form method="post" action="/account/promise-tracker">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="actions"><button class="danger" type="submit" name="action" value="remove" data-confirm="Remove your token? You won't be able to send until you add one again.">Remove token</button></div>
+  </form>
+  {% else %}
+  <p class="muted">No token saved.</p>
+  {% endif %}
+
+  <h2>{{ 'Replace token' if tok else 'Add token' }}</h2>
+  {% if key_set %}
+  <form method="post" action="/account/promise-tracker">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="t">Token <span class="hint">issued to you in the Promise Tracker admin</span></label>
+    <input id="t" type="password" name="token" autocomplete="off" required minlength="16" maxlength="512">
+    <p class="hint">We check it with Promise Tracker, store it encrypted and never show it again.</p>
+    <div class="actions"><button type="submit" name="action" value="save">Save token</button></div>
+  </form>
+  {% else %}
+  <p class="muted">The server has no <code>PM_TOKEN_KEY</code>, so tokens can't be stored. Ask the administrator.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Sent by you</h2>
+  {% if sent %}
+  <table class="tight"><thead><tr><th>Update</th><th>Status</th></tr></thead><tbody>
+  {% for x in sent %}
+  <tr><td><a href="/review/articles/{{ x.article_id }}">{{ headlines.get(x.article_id, x.article_id) }}</a><div class="muted small">sent {{ local(x.submitted_at) }}{% if x.reviewer_note %} · “{{ x.reviewer_note }}”{% endif %}</div></td>
+  <td>{{ state(x.remote_state) }}</td></tr>
+  {% endfor %}
+  </tbody></table>
+  {% else %}<p class="muted">Nothing sent yet.</p>{% endif %}
+</section>
+</div>
+{% endblock %}

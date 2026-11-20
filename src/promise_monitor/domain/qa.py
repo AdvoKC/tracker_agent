@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from promise_monitor.domain.urls import host_of, normalize_url
+from promise_monitor.house_style import closer_issue
 
 LINK_RE = re.compile(r"\[([^\]]+)\]\(\s*<?([^)\s>]+)>?\s*\)")
 BARE_URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
@@ -59,6 +60,7 @@ class QAContext:
     min_links: int = 2
     max_headline_words: int = 14
     max_quote_words: int = 15
+    house_style: bool = True  # AdvoKC closing line + never name the platform (house_style.py)
 
 
 @dataclass
@@ -181,6 +183,19 @@ def check_article(headline: str, body: str, ctx: QAContext) -> QAReport:
         hit = next((p for p in RATING_CHANGE_PHRASES if p in low), None)
         if hit:
             issues.append(f"status: the rating did not change; remove '{hit}'")
+
+    # 4b. AdvoKC house style ---------------------------------------------------------------------
+    if ctx.house_style:
+        problem = closer_issue(
+            strip_links(body), STATUS_LABELS[ctx.current_status], ctx.has_status_change
+        )
+        if problem:
+            issues.append(problem)
+        if "promise tracker" in text.lower():
+            issues.append(
+                "house style: don't name 'Promise Tracker'; refer to the promise through the "
+                "official, and link the promise page on 'This promise' in the closing line"
+            )
 
     # 5. banned terms -------------------------------------------------------------------------
     for term in ctx.banned_terms:

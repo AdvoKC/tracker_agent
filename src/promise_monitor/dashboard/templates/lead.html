@@ -1,0 +1,56 @@
+{% extends "base.html" %}{% from "_macros.html" import state, verdict, job_button, icon %}
+{% block title %}Evidence lead{% endblock %}
+{% block content %}
+<a class="crumb" href="/review">Review queue</a>
+<header class="page-head"><div><h1>Evidence lead</h1>
+<p class="sub">{{ state(g.state) }} · <a href="/meters/{{ meter.id }}">{{ meter.name }}</a> · <a href="/promises/{{ g.promise_id }}">{{ title[:140] }}</a></p></div></header>
+{% set to_confirm = sources|selectattr('confirmable')|list %}
+{% if g.state == 'needs_sources' and to_confirm %}
+<section class="card">
+  <h2>The agent was blocked: please confirm {{ 'this source' if to_confirm|length == 1 else 'these sources' }}</h2>
+  <p class="small">{{ 'This site' if to_confirm|length == 1 else 'These sites' }} refused the agent's reader, so it couldn't check the page itself. That doesn't mean the source is bad. Open it, and if it's genuine and reports this development, confirm it. Claude then drafts the update for you to review and approve as usual.</p>
+  {% for src in to_confirm %}
+  <form method="post" action="/review/leads/{{ g.group_id }}" class="confirm-source">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="confirm">
+    <input type="hidden" name="source_id" value="{{ src.id }}">
+    <p><a href="{{ src.url }}" target="_blank" rel="noopener noreferrer">{{ src.hint }}</a> {{ icon('external') }}<br><span class="muted small">{{ src.url }} · {{ src.role }}{% if src.http %} · HTTP {{ src.http }}{% endif %}</span></p>
+    <label for="t{{ src.id }}">Headline as shown on the page</label>
+    <input id="t{{ src.id }}" type="text" name="title" maxlength="300" value="{{ src.hint }}">
+    <label><input type="checkbox" name="checked" value="yes" required> I opened this page. It's genuine and reports this development.</label>
+    <div class="actions"><button type="submit">Confirm source</button></div>
+  </form>
+  {% endfor %}
+</section>
+{% endif %}
+{% if article %}<p><a class="button" href="/review/articles/{{ article.article_id }}">Open the drafted update</a> {{ state(article.state) }}</p>{% endif %}
+<div class="grid2">
+<section class="card">
+  <h2>{{ 'Why no draft was written' if g.state == 'needs_sources' else 'Verification notes' }}</h2>
+  <ul class="plain">{% for n in g.notes or [] %}<li>{{ n }}</li>{% else %}<li>The change's sources could not be verified.</li>{% endfor %}</ul>
+  {% if news %}<h2>News behind it</h2>
+  <ul class="plain">{% for n in news %}<li><a href="{{ n.url }}" rel="noopener noreferrer">{{ n.headline }}</a> <span class="muted small">{{ n.outlet }}, {{ n.published_date }} · relevance {{ '%.2f'|format(n.relevance) }}</span><div class="small">{{ n.summary }}</div></li>{% endfor %}</ul>{% endif %}
+  <p class="muted small">Check the sources yourself. If the development is real, update Promise Tracker: the monitor will then pick up the change and draft an article.</p>
+</section>
+<section class="card">
+  {% if g.state == 'needs_sources' %}
+  <h2>Close this lead</h2>
+  <form method="post" action="/review/leads/{{ g.group_id }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="n">Note</label><input id="n" type="text" name="note" maxlength="1000" placeholder="e.g. checked: no new development">
+    <div class="actions"><button type="submit" class="danger" data-confirm="Dismiss this lead? It will not be drafted.">Dismiss lead</button></div>
+  </form>
+  {% if user.role == 'superadmin' %}
+  <h2>Operations</h2>
+  <div class="actions">{{ job_button('verify_group', g.group_id, 'Re-verify sources (no cache)', csrf, '/review/leads/' ~ g.group_id) }}</div>
+  {% endif %}
+  {% else %}<p>This lead is {{ g.state }}.</p>{% endif %}
+</section>
+</div>
+<h2>Sources checked</h2>
+<div class="scroll"><table>
+<thead><tr><th>Source</th><th>Role</th><th>Fetch</th><th>Verdict</th><th>Why</th></tr></thead>
+<tbody>{% for s in sources %}
+<tr><td><a href="{{ s.url }}" rel="noopener noreferrer">{{ s.title or s.url }}</a> <span class="small"><a href="/sources/{{ s.id }}">details</a></span></td><td class="small">{{ s.role }}</td><td class="small">{{ s.fetch }}{% if s.http %} ({{ s.http }}){% endif %}</td><td>{% if s.confirmable %}<span class="pill v-unverifiable">agent blocked: confirm</span>{% else %}{{ verdict(s.verdict) }}{% endif %}{% if s.confirmed_at %}<div class="muted small">confirmed by a coordinator</div>{% endif %}</td><td class="small">{{ s.reason or '' }}</td></tr>
+{% else %}<tr><td colspan="5" class="muted">None.</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

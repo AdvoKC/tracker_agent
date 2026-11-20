@@ -1,0 +1,40 @@
+{% extends "base.html" %}{% from "_macros.html" import state, meter_select %}
+{% block title %}Review{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>Review queue</h1>
+<p class="sub">Open each draft, check it against its sources, edit if needed, then approve or reject. Leads are changes whose sources couldn't be verified.</p></div></header>
+<form class="filters" method="get">
+  {{ meter_select(meter_options, meter_q) }}
+  <select name="state" aria-label="State">
+    {% for v, l in [('open','Open (to review)'),('needs_attention','Needs attention'),('stale','Stale'),('approved','Approved'),('published','Published'),('rejected','Rejected')] %}
+    <option value="{{ v }}" {{ 'selected' if state_q == v }}>{{ l }}</option>{% endfor %}
+  </select>
+  <button class="ghost" type="submit">Filter</button>
+</form>
+<h2 class="section">Drafts <span class="count">{{ articles|length }}</span></h2>
+<div class="scroll"><table>
+<thead><tr><th>Headline</th><th>Meter · promise</th><th>What changed</th><th>Words</th><th>State</th><th>Created</th></tr></thead>
+<tbody>
+{% for a in articles %}
+<tr>
+  <td><a href="/review/articles/{{ a.article_id }}">{{ a.headline or '(no headline)' }}</a>{% if a.qa_flags %}<div><span class="pill st-needs_attention">{{ a.qa_flags|length }} QA issue(s)</span></div>{% endif %}</td>
+  <td class="small">{{ meters[a.meter_id].name if a.meter_id in meters }}<div class="muted">{{ titles.get(a.promise_id, '')[:80] }}</div></td>
+  <td class="small">{{ summary_of(a.writer_input or {})|join('; ') }}</td>
+  <td>{{ a.word_count }}</td><td>{{ state(a.state) }}</td><td class="small">{{ local(a.created_at) }}</td>
+</tr>
+{% else %}<tr><td colspan="6" class="muted">Nothing here.</td></tr>{% endfor %}
+</tbody></table></div>
+{% if state_q == 'open' %}
+<h2 class="section">Evidence leads <span class="count">{{ leads|length }}</span></h2>
+<div class="scroll"><table>
+<thead><tr><th>Promise</th><th>Meter</th><th>Why it's a lead</th><th>Found</th></tr></thead>
+<tbody>
+{% for g in leads %}
+<tr><td><a href="/review/leads/{{ g.group_id }}">{{ titles.get(g.promise_id, '(promise)')[:100] }}</a></td>
+<td class="small">{{ meters[g.meter_id].name if g.meter_id in meters }}</td>
+<td class="small">{% set n = (g.notes or ['sources could not be verified'])|first %}{% if n.startswith('blocked:') %}<span class="pill v-unverifiable">agent blocked: confirm source</span>{% else %}{{ n }}{% endif %}</td>
+<td class="small">{{ local(g.created_at) }}</td></tr>
+{% else %}<tr><td colspan="4" class="muted">No open leads.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endif %}
+{% endblock %}

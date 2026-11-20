@@ -35,6 +35,7 @@ from promise_monitor.db.models import (
 )
 from promise_monitor.domain.qa import STATUS_LABELS, QAContext, QAReport, check_article
 from promise_monitor.domain.urls import normalize_url
+from promise_monitor.house_style import house_examples
 from promise_monitor.llm.base import LLMAuthError, LLMClient, LLMError, LLMRequest
 from promise_monitor.llm.prompts import Prompt, load_prompt
 from promise_monitor.logging_setup import get_logger
@@ -76,6 +77,12 @@ class LoopResult:
     history: list[list[str]] = field(default_factory=list)  # issues per attempt
 
 
+def format_examples(examples: list[str]) -> str:
+    if not examples:
+        return "(no examples available: follow the house rules above)"
+    return "\n\n".join(f"Example {i + 1}:\n{t}" for i, t in enumerate(examples))
+
+
 def run_draft_loop(
     llm: LLMClient,
     writer_input: dict[str, Any],
@@ -85,6 +92,7 @@ def run_draft_loop(
     subject_id: str | None = None,
     writer_prompt: Prompt | None = None,
     editor_prompt: Prompt | None = None,
+    examples: list[str] | None = None,
 ) -> LoopResult:
     """Draft until QA + editor pass or rewrites run out. Raises LLMError on outages."""
     wp = writer_prompt or load_prompt("writer")
@@ -102,6 +110,7 @@ def run_draft_loop(
             min_words=str(cfg.min_words),
             max_words=str(cfg.max_words),
             target_words=str(cfg.target_words),
+            house_examples=format_examples(examples or []),
             input_json=json.dumps(payload, ensure_ascii=False, indent=1),
         )
         resp = llm.run(
@@ -159,6 +168,7 @@ class PreparedGroup:
     qa: QAContext
     url_to_source: dict[str, int]
     events: list[ChangeEvent]
+    examples: list[str]
 
 
 def _date_text(value: object) -> str | None:
@@ -225,6 +235,20 @@ def prepare_group(
                 )
         elif ev.change_type == "new_promise":
             changes.append({"type": "new_promise"})
+        elif ev.change_type == "coordinator_update":
+            rating = ev.new_status or current
+            if rating != current and old_status is None:
+                # The coordinator re-rates the promise: report it as a rating change.
+                old_status = current
+                changes.append(
+                    {
+                        "type": "status_change",
+                        "old_status": STATUS_LABELS.get(current, current),
+                        "new_status": STATUS_LABELS.get(rating, rating),
+                    }
+                )
+            current = rating
+            changes.append({"type": "coordinator_update", "description": ev.brief or ""})
         elif ev.change_type == "news_update" and ev.news_item_id in news:
             n = news[ev.news_item_id]
             changes.append(
@@ -251,7 +275,7 @@ def prepare_group(
             {
                 "id": src.source_id,
                 "url": src.url,
-                "title": src.title or src.search_title,
+                "title": src.title or src.search_title or ags.confirmed_title,
                 "publisher": src.publisher,
                 "date": _date_text(src.published_date),
                 "snippet": None if partial else (src.snippet or "")[:800],
@@ -294,7 +318,50 @@ def prepare_group(
         max_headline_words=cfg.max_headline_words,
         max_quote_words=cfg.max_quote_words,
     )
-    return PreparedGroup(writer_input, qa, url_to_source, events)
+    examples = house_examples(
+        session, group.meter_id, cfg.house_examples, exclude_promise=group.promise_id
+    )
+    return PreparedGroup(writer_input, qa, url_to_source, events, examples)
+
+
+_LABEL_TO_STATUS = {label: value for value, label in STATUS_LABELS.items()}
+
+
+def qa_context_from_input(
+    writer_input: dict[str, Any],
+    cfg: ArticleConfig,
+    banned_terms: tuple[str, ...],
+    recent_bodies: tuple[str, ...] = (),
+) -> QAContext:
+    """Rebuild the QA context from a stored ``writer_input`` (used to re-check human edits)."""
+    promise = writer_input.get("promise") or {}
+    current = _LABEL_TO_STATUS.get(str(promise.get("current_status")), "not_yet_rated")
+    old = next(
+        (
+            _LABEL_TO_STATUS.get(str(c.get("old_status")))
+            for c in writer_input.get("changes") or []
+            if c.get("type") == "status_change"
+        ),
+        None,
+    )
+    citable = frozenset(
+        u for s in writer_input.get("sources") or [] if (u := normalize_url(str(s.get("url", ""))))
+    )
+    return QAContext(
+        citable_urls=citable,
+        promise_url=normalize_url(str(promise.get("promise_url", ""))) or "",
+        current_status=current,
+        old_status=old,
+        has_status_change=old is not None,
+        banned_terms=banned_terms,
+        min_words=cfg.min_words,
+        max_words=cfg.max_words,
+        recent_bodies=recent_bodies,
+        dedupe_similarity=cfg.dedupe_similarity,
+        min_links=cfg.min_links,
+        max_headline_words=cfg.max_headline_words,
+        max_quote_words=cfg.max_quote_words,
+    )
 
 
 class Drafter:
@@ -316,13 +383,15 @@ class Drafter:
         self.now = now
         self.result = WriteResult()
 
-    def run(self, limit: int | None = None) -> WriteResult:
+    def run(self, limit: int | None = None, only: uuid.UUID | None = None) -> WriteResult:
+        q = select(ArticleGroup).where(ArticleGroup.state == "verified")
+        if only is not None:
+            q = q.where(ArticleGroup.group_id == only)
         groups = list(
             self.s.scalars(
-                select(ArticleGroup)
-                .where(ArticleGroup.state == "verified")
-                .order_by(ArticleGroup.verified_at, ArticleGroup.group_id)
-                .limit(limit or self.cfg.max_groups_per_run)
+                q.order_by(ArticleGroup.verified_at, ArticleGroup.group_id).limit(
+                    limit or self.cfg.max_groups_per_run
+                )
             )
         )
         for group in groups:
@@ -345,7 +414,12 @@ class Drafter:
         if not prep.events:
             raise DeferredError("no queued events left in group")
         loop = run_draft_loop(
-            self.llm, prep.writer_input, prep.qa, self.cfg, subject_id=str(group.group_id)
+            self.llm,
+            prep.writer_input,
+            prep.qa,
+            self.cfg,
+            subject_id=str(group.group_id),
+            examples=prep.examples,
         )
         linked = [u for _a, u in (loop.report.links if loop.report else [])]
         source_ids = list(

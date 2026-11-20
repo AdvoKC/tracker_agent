@@ -31,11 +31,12 @@ classifier:
   priority_meter_max_rank: 3
   bonus_high_priority_promise: 5
   bonus_news_high_confidence: 10  # news relevance >= 0.9
+  own_submission_max_edit_ratio: 0.3  # tracker update ≈ a body we submitted → ours, never re-reported
 
 news:
   enabled: true
-  batch_size: 10                  # promises per Claude web-search call
-  max_calls_per_run: 12           # 12 x 10 = 120 promises/day; full rotation ~every 3 days
+  batch_size: 15                  # promises per Claude web-search call (one meter per call)
+  max_calls_per_run: 5            # 5 x 15 = 75 promises/day; full rotation ~every 5 days (was 12 x 10, 2026-11-20)
   lookback_days: 30               # never report news older than this
   min_relevance: 0.75
   max_results_per_promise: 3
@@ -61,6 +62,7 @@ verifier:
   max_parallel_hosts: 4
   relevance_min_confidence: 0.6
   cache_days: 7
+  search_retry_days: 1           # blocked page not found in search: try search again after this
   max_bytes: 2000000             # stop reading a response after this many bytes
   min_text_chars: 300            # less readable text than this on a 200 page = paywall/blocked
   max_context_sources: 4         # context links checked per group (required links are all checked)
@@ -68,8 +70,12 @@ verifier:
   date_tolerance_days: 2         # page date vs News Scout's claimed date
 
 article:
-  target_words: 100
-  tolerance_words: 5
+  # AdvoKC house style (measured 2026-11-18 on 462 AdvoKC updates: median 74 words, p25 57,
+  # p75 95). Owner rule: never more than 100 words (headline excluded).
+  target_words: 80
+  min_words: 60
+  max_words: 100
+  house_examples: 4              # real AdvoKC updates (same meter first) shown to the Writer
   min_links: 2
   max_rewrites: 3
   dedupe_similarity: 0.9
@@ -79,6 +85,36 @@ article:
   max_groups_per_run: 20
 
 review:
+  channel: dashboard             # dashboard (default) | sheets (legacy P6 Google Sheet queue)
+  dashboard_url: http://localhost:8800   # linked from digests; change when moved to the VPS
   stale_after_days: 7
+  coordinators_tab: coordinators
+
+publish:
+  # Shadow mode (PRD §8 P8): everything runs and coordinators approve, but approved articles
+  # are HELD and nothing is rendered publicly until this is true. Flip after the 2-week review.
+  enabled: false
+
+submissions:
+  # P12 (PRD §8d): coordinators send approved articles to Promise Tracker's review queue with
+  # their own backend-issued token. Also needs publish.enabled. Off until the backend exists.
+  enabled: false
+  base_url: https://admin.promisetracker.ng/api/v1/promise-tracker/submissions
+  timeout_seconds: 20
+  poll_max_per_run: 50           # open submissions checked per daily run (1 request/second)
+
+logs:
+  retention_days: 90
+
+site:
+  out_dir: site                  # static HTML output (git-ignored); swapped in atomically
+  title: Promise Tracker Updates
+  organisation: AdvoKC Foundation
+  promise_tracker_url: https://promisetracker.ng
+
+notify:
+  enabled: true
+  missed_run_hours: 36           # alert if the last successful run is older than this
+  consecutive_failures_urgent: 2
 
 timezone_display: Africa/Lagos

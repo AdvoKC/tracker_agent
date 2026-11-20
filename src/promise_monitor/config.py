@@ -10,7 +10,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PositiveFloat, PositiveInt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    PositiveFloat,
+    PositiveInt,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -28,6 +36,16 @@ class Settings(BaseSettings):
     log_dir: Path = Path("logs")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     config_dir: Path = DEFAULT_CONFIG_DIR
+    review_spreadsheet_id: str | None = None  # the coordinators' Google Sheet
+    google_service_account_file: Path | None = None  # JSON key; never commit it
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None  # Gmail app password; never commit it
+    smtp_from: str | None = None
+    dashboard_secret: str | None = None  # signs session cookies; set a long random value
+    dashboard_https: bool = False  # true behind HTTPS (VPS): cookies become Secure-only
+    token_key: str | None = None  # Fernet key encrypting coordinators' Promise Tracker tokens
 
 
 class _Strict(BaseModel):
@@ -70,6 +88,8 @@ class ClassifierConfig(_Strict):
     priority_meter_max_rank: PositiveInt
     bonus_high_priority_promise: int = Field(ge=0)
     bonus_news_high_confidence: int = Field(ge=0)
+    # a new tracker update this close to a body we submitted is our own (PRD §8d)
+    own_submission_max_edit_ratio: float = Field(ge=0, le=1)
 
 
 class NewsConfig(_Strict):
@@ -116,6 +136,7 @@ class VerifierConfig(_Strict):
     max_parallel_hosts: PositiveInt
     relevance_min_confidence: float = Field(ge=0, le=1)
     cache_days: PositiveInt
+    search_retry_days: PositiveInt = 1  # re-search a blocked page that search missed
     max_bytes: PositiveInt
     min_text_chars: PositiveInt
     max_context_sources: int = Field(ge=0)
@@ -125,7 +146,14 @@ class VerifierConfig(_Strict):
 
 class ArticleConfig(_Strict):
     target_words: PositiveInt
-    tolerance_words: int = Field(ge=0)
+    min_words: PositiveInt
+    max_words: PositiveInt
+    house_examples: int = Field(ge=0, le=8)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> ArticleConfig:
+        return _check_article(self)
+
     min_links: PositiveInt
     max_rewrites: int = Field(ge=0)
     dedupe_similarity: float = Field(gt=0, le=1)
@@ -134,17 +162,54 @@ class ArticleConfig(_Strict):
     max_quote_words: PositiveInt
     max_groups_per_run: PositiveInt
 
-    @property
-    def min_words(self) -> int:
-        return self.target_words - self.tolerance_words
 
-    @property
-    def max_words(self) -> int:
-        return self.target_words + self.tolerance_words
+def _check_article(cfg: ArticleConfig) -> ArticleConfig:
+    if not cfg.min_words <= cfg.target_words <= cfg.max_words:
+        raise ValueError("article: need min_words <= target_words <= max_words")
+    return cfg
 
 
 class ReviewConfig(_Strict):
+    channel: Literal["dashboard", "sheets"]
+    dashboard_url: str
     stale_after_days: PositiveInt
+    coordinators_tab: str
+
+
+class PublishConfig(_Strict):
+    enabled: bool
+
+
+class SubmissionsConfig(_Strict):
+    """Sending approved articles to Promise Tracker's review queue (PRD §8d, P12)."""
+
+    enabled: bool
+    base_url: HttpUrl
+    timeout_seconds: PositiveFloat
+    poll_max_per_run: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _https(self) -> SubmissionsConfig:
+        if self.base_url.scheme != "https":
+            raise ValueError("submissions.base_url must be https (tokens travel in headers)")
+        return self
+
+
+class LogsConfig(_Strict):
+    retention_days: PositiveInt
+
+
+class SiteConfig(_Strict):
+    out_dir: Path
+    title: str
+    organisation: str
+    promise_tracker_url: HttpUrl
+
+
+class NotifyConfig(_Strict):
+    enabled: bool
+    missed_run_hours: PositiveInt
+    consecutive_failures_urgent: PositiveInt
 
 
 class TunablesConfig(_Strict):
@@ -156,6 +221,11 @@ class TunablesConfig(_Strict):
     llm: LLMConfig
     article: ArticleConfig
     review: ReviewConfig
+    publish: PublishConfig
+    submissions: SubmissionsConfig
+    logs: LogsConfig
+    site: SiteConfig
+    notify: NotifyConfig
     timezone_display: str
 
 

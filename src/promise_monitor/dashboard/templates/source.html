@@ -1,0 +1,26 @@
+{% extends "base.html" %}{% from "_macros.html" import verdict, state %}
+{% block title %}Source{% endblock %}
+{% block content %}
+<a class="crumb" href="/sources">Sources</a>
+<header class="page-head"><div><h1>{{ src.title or src.search_title or 'Source' }}</h1>
+<p class="sub"><a href="{{ src.url }}" rel="noopener noreferrer">{{ src.url }}</a></p></div></header>
+<div class="grid2">
+<section class="card"><dl class="kv">
+  <dt>Fetch</dt><dd>{{ src.fetch_status }}{% if src.http_status %} (HTTP {{ src.http_status }}){% endif %}</dd>
+  <dt>Final URL</dt><dd class="small">{{ src.final_url or '-' }}</dd>
+  <dt>Type</dt><dd>{{ src.content_type or '-' }}</dd>
+  <dt>Publisher</dt><dd>{{ src.publisher or '-' }}</dd>
+  <dt>Published</dt><dd>{{ src.published_date or '-' }}</dd>
+  <dt>Search check</dt><dd>{{ 'confirmed: ' ~ (src.search_title or '') if src.search_confirmed else ('not found' if src.search_checked_at else 'not needed') }}</dd>
+  <dt>Checked</dt><dd>{{ local(src.checked_at) }}</dd>
+  {% if src.error %}<dt>Error</dt><dd>{{ src.error }}</dd>{% endif %}
+</dl></section>
+<section class="card"><h2>Extract</h2><p class="small">{{ (src.snippet or 'No readable text (blocked, paywalled or not fetched).')[:1500] }}</p></section>
+</div>
+<h2>Used by</h2>
+<div class="scroll"><table>
+<thead><tr><th>Promise</th><th>Meter</th><th>Role</th><th>Verdict</th><th>Relevance</th><th>Group</th></tr></thead>
+<tbody>{% for ags, g in uses %}
+<tr><td class="small"><a href="/promises/{{ g.promise_id }}">{{ titles.get(g.promise_id, '')[:90] }}</a></td><td class="small">{{ meters[g.meter_id].name if g.meter_id in meters }}</td><td class="small">{{ ags.role }}</td><td>{{ verdict(ags.verdict) }}</td><td>{{ '%.2f'|format(ags.relevance_confidence) if ags.relevance_confidence is not none else '-' }}<div class="muted small">{{ ags.reason or '' }}</div></td><td>{{ state(g.state) }}</td></tr>
+{% else %}<tr><td colspan="6" class="muted">Not used.</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

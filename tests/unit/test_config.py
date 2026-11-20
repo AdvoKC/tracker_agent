@@ -15,8 +15,8 @@ def test_repo_config_loads() -> None:
     cfg = load_app_config(CONFIG_DIR)
     assert len(cfg.states) == 37
     assert "Abuja" in cfg.states  # site spelling for FCT
-    assert cfg.tunables.article.min_words == 95
-    assert cfg.tunables.article.max_words == 105
+    assert cfg.tunables.article.min_words == 60
+    assert cfg.tunables.article.max_words == 100  # owner rule: never more than 100 words
     assert cfg.tunables.api.min_interval_seconds >= 1.0  # politeness rule (AGENTS.md #7)
     assert cfg.priority.rank_for("presidential") == 1
     assert cfg.priority.rank_for("state:Kano") == cfg.priority.default_rank

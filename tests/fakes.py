@@ -78,16 +78,22 @@ class FakeLLM:
     News Scout-shaped outputs, every result URL is treated as found in search (grounded).
     """
 
-    def __init__(self, *outputs: dict[str, Any] | Exception, default: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        *outputs: dict[str, Any] | Exception,
+        default: dict[str, Any] | None = None,
+        by_task: dict[str, dict[str, Any]] | None = None,
+    ):
         self.queue: list[dict[str, Any] | Exception] = list(outputs)
         self.default = default
+        self.by_task = by_task or {}
         self.requests: list[Any] = []
 
     def run(self, request: Any) -> Any:
         from promise_monitor.llm.base import LLMResponse
 
         self.requests.append(request)
-        item = self.queue.pop(0) if self.queue else self.default
+        item = self.queue.pop(0) if self.queue else self.by_task.get(request.task, self.default)
         if item is None:
             raise AssertionError(f"unexpected LLM call: {request.task}")
         if isinstance(item, Exception):

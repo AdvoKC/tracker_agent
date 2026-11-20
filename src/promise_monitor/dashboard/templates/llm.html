@@ -1,0 +1,18 @@
+{% extends "base.html" %}{% from "_macros.html" import state %}
+{% block title %}LLM usage{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>Claude usage · last 30 days</h1>
+<p class="sub">Total ≈ <strong>${{ '%.2f'|format(total) }}</strong> equivalent (counts against the Claude subscription).</p></div></header>
+<div class="scroll"><table>
+<thead><tr><th>Agent</th><th>Model</th><th class="right">Calls</th><th class="right">Cost</th></tr></thead>
+<tbody>{% for agent, model, n, cost in rows %}<tr><td>{{ agent }}</td><td class="small">{{ model or '-' }}</td><td class="right">{{ n }}</td><td class="right">${{ '%.2f'|format(cost or 0) }}</td></tr>
+{% else %}<tr><td colspan="4" class="muted">No calls yet.</td></tr>{% endfor %}</tbody></table></div>
+<h2>Recent failures</h2>
+<div class="scroll"><table><thead><tr><th>When</th><th>Agent</th><th>Error</th></tr></thead><tbody>
+{% for c in errors %}<tr><td class="small">{{ local(c.created_at) }}</td><td>{{ c.agent }}</td><td class="small">{{ (c.error or '')[:240] }}</td></tr>
+{% else %}<tr><td colspan="3" class="muted">None.</td></tr>{% endfor %}</tbody></table></div>
+<h2>Recent calls</h2>
+<div class="scroll"><table class="tight"><thead><tr><th>When</th><th>Agent</th><th>Prompt</th><th>Subject</th><th>Latency</th><th>Cost</th><th>OK</th></tr></thead><tbody>
+{% for c in recent %}<tr><td class="small">{{ local(c.created_at) }}</td><td>{{ c.agent }}</td><td class="small">{{ c.prompt_name }}</td><td class="small">{{ (c.subject_id or '')[:24] }}</td><td class="small">{{ (c.latency_ms / 1000)|round(1) }}s</td><td class="small">${{ '%.3f'|format(c.cost_usd or 0) }}</td><td>{{ state('ok' if c.ok else 'failed') }}</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}

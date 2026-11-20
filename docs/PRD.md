@@ -5,7 +5,7 @@
 | Status | Draft v1.0 (agreed in the 2026-11-16 design session) |
 | Owner | AdvoKC Foundation, Promise Tracker team |
 | Data source | promisetracker.ng public JSON API, used with operator permission |
-| Stack | Python 3.12, LangGraph, PostgreSQL, Google Sheets, Jinja2 |
+| Stack | Python 3.12 (plain, stage-isolated pipeline; LangGraph dropped in P8, see §5.2), PostgreSQL, Google Sheets, Jinja2, Claude via `claude -p` |
 | Schedule | Daily 08:00 WAT (07:00 UTC) |
 
 ---
@@ -17,7 +17,7 @@ promisetracker.ng tracks the promises of Nigerian public officials through **met
 **Goals**
 1. Cover every meter on the site and pick up new meters automatically.
 2. Detect every *meaningful* change: a status change, new evidence, or a new promise on promisetracker.ng. **Also find outside news reporting concrete developments on a promise (News Scout, §3.9).** Never report the same change or story twice.
-3. Turn each meaningful change into a neutral 100-word article (±5 words) with at least 2 verified, descriptively anchored hyperlinks.
+3. Turn each meaningful change into a neutral update article **in AdvoKC's house style, never more than 100 words** (60–100; owner decision 2026-11-18, replacing "100 ± 5"), with at least 2 verified, descriptively anchored hyperlinks.
 4. A human coordinator for each meter approves every article before it is published as a static HTML report per meter.
 5. Run unattended every day using free tools only, with a full audit trail.
 
@@ -25,7 +25,7 @@ promisetracker.ng tracks the promises of Nigerian public officials through **met
 - Opinion, analysis, or rating promises ourselves. We report what promisetracker.ng published and what the sources show.
 - Languages other than English.
 - Social-media or email publishing of articles. Email is used only for coordinator and admin alerts.
-- Changing data on promisetracker.ng.
+- Changing data on promisetracker.ng directly. *Amended 2026-11-19 (owner):* approved updates may be **submitted to its review queue** with a coordinator's own token (§8d). Promise Tracker editors still publish, and ratings are never changed.
 
 ---
 
@@ -226,8 +226,10 @@ Short form: **Discovery → Monitor → Classifier → Verifier → Writer → E
 **As built (P4, 2026-11-17):**
 - **Blocked sites.** About half the allowlisted outlets answer 403 or 401 to an honestly identified fetcher (Channels TV, TheCable, Vanguard, Guardian NG, Reuters). Claude's WebFetch is blocked too.
   - A blocked or paywalled URL is therefore confirmed only when it appears in **raw WebSearch tool results**, which are taken from the CLI's `stream-json` events and are not written by the model.
-  - News URLs reuse the News Scout's grounding. Any other URL gets one search call, cached for `cache_days`, including negative results.
+  - News URLs reuse the News Scout's grounding. Any other URL gets one search call. A hit is cached for `cache_days`; a miss is retried after `search_retry_days` (default 1), because new articles reach search late. A hit counts when its normalized URL matches, or when it has the same host and the same long final path segment (≥ 20 characters, e.g. an AMP copy).
   - Confirmed and relevant means `verified_partial`. Not confirmed means `unverifiable`.
+  - **Coordinator confirmation (added 2026-11-19, owner decision).** The search index misses some outlets entirely (Channels TV in Nov 2026), so a blocked page that search can't find is **not rejected**. The lead shows it as "agent blocked: confirm". A coordinator who can see the meter opens the page, ticks "I opened this page. It's genuine and reports this development", and can correct the headline. The source becomes `verified_partial` and citable, with `confirmed_by`/`confirmed_at`/`confirmed_title` on `article_group_sources` and a `source.confirm` audit row. If the group is then sufficient (same rule as below), it goes back to `verified` and a `draft_group` job drafts it. The draft passes every QA rule and is approved as usual. A confirmation outranks the title-only relevance guess and survives re-verification. Only blocked or paywalled pages can be confirmed; readable pages keep their checked verdicts.
+- **Relevance input:** for `new_evidence` and `status_change`, the judge also gets the published Promise Tracker update text (≤ 800 characters each), because that text is what ties a cited article to the promise.
 - **Required sources per event:**
   - `new_evidence`: the new update's links;
   - `status_change` with no new update: the latest update's links;
@@ -294,6 +296,20 @@ Short form: **Discovery → Monitor → Classifier → Verifier → Writer → E
 - **Audit:** `articles.writer_input` stores exactly what the Writer was given.
 - **CLI:** `promise-monitor write [--limit N] [--dry-run]` and `promise-monitor eval-writer` (the P5 exit check: ≥90% of fixture cases pass within 3 rewrites).
 
+**AdvoKC house style (2026-11-18, owner request):** articles must read like AdvoKC's own updates. The conventions were studied from 462 AdvoKC evidence updates (`house_style.py`):
+- **Headline:** the actor and the action, following the meter's own capitalisation (presidential updates use UPPERCASE, state meters Title Case). Bill updates lead with the bill number.
+- **Lead:** actor first, with concrete figures, places and dates.
+- **Attribution:** "a statement by…", "according to a report by…", linked to the source the evidence cites.
+- **Closing line, always:** "[This promise](promise page) is rated, ‘IN THE WORKS.’", with the rating in capitals; "now rated" only for a status change.
+- **Never "Promise Tracker":** that phrase appears in 0 of 462 AdvoKC updates.
+- **Length:** median 74 words, so the limit is **60–100, target 80**.
+
+How it is applied:
+- Each draft gets **up to 4 real AdvoKC updates from the same meter**, then the same meter family, most recent first, as style examples. They are selected live from the snapshots, so the style follows AdvoKC's latest writing.
+- The code QA enforces the closing line, the ban on "Promise Tracker" and the word limit.
+- The Editor accepts the house voice (evidence facts stated directly; crediting a source whose title or snippet contains the fact), but still flags copied evaluative words and any added purpose, effect or total.
+- **Eval:** `promise-monitor eval-writer` scored 9 of 9 at 62–97 words, using `tests/fixtures/house_style_examples.json` (41 real AdvoKC updates).
+
 ### 3.7 Publisher Agent
 
 - **Goal:** turn approved drafts into the per-meter HTML reports.
@@ -317,7 +333,7 @@ Short form: **Discovery → Monitor → Classifier → Verifier → Writer → E
 - **Search engine:** Claude web search through `claude -p` with `--tools WebSearch`. This was the owner's choice over RSS feeds or GDELT.
 - **Inputs:** promises that are present on active, baselined meters.
   - The least recently searched go first; meter priority breaks ties.
-  - `news.batch_size` (10) promises go into each call, with at most `news.max_calls_per_run` (12) calls.
+  - `news.batch_size` (15) promises go into each call, with at most `news.max_calls_per_run` (5) calls: about 75 promises a day, a full rotation about every 5 days (lowered from 10 × 12 on 2026-11-20 to save quota; the rotation must stay well inside `lookback_days` so no news is missed).
   - Each promise has a **cutoff**: the later of its last tracker update and today minus `lookback_days` (30).
 - **Prompt:** `prompts/news_scout.md`, which embeds the outlet allowlist from `config/news_sources.yaml`.
   - Claude must report only URLs it saw in search results, with full dates.
@@ -344,11 +360,32 @@ Short form: **Discovery → Monitor → Classifier → Verifier → Writer → E
 - **Usage (measured 2026-11-17):** one 10-promise call took about 15–30 s and used roughly 10–15 web searches, costing about $0.08–0.30 equivalent. 12 calls a day is about $1–4 equivalent per day and covers every promise roughly every 3 days.
 - **CLI:** `promise-monitor news-scan [--max-calls N] [--dry-run]`.
 
+**As built (P7, 2026-11-17):**
+- `publish_approved` moves only `approved` articles, and their group and events, to `published`.
+- `render_site` writes `index.html` and `meters/<slug>-<id8>.html`, newest first. Each page shows the rating badge (with the old rating for status changes), a "news report" label and a Sources list. A `verified_partial` source is described as "the site blocks automated reading; its headline was confirmed through search".
+- Markdown is rendered with raw HTML **disabled**. Jinja2 autoescapes everything else. Every link gets `rel="noopener noreferrer"`. No JavaScript, no external requests, and dark mode is supported.
+- The site is built in a temp directory (mode 755) and swapped in. A failed render leaves the previous site.
+- **CLI:** `promise-monitor publish [--out DIR]`. Serving or hosting `site/` (GitHub Pages or an AdvoKC domain) is P9.
+
+### 3.10 Coordinator briefs: "Write an update" (added 2026-11-18)
+
+A coordinator (for their meters) or the superadmin can ask for an update on any promise still on the tracker, from its dashboard page.
+- **Input:** a description of what happened (30–1500 characters), the rating the update reports (default: the current rating), and 1–5 source links.
+- **Record:** a `coordinator_update` change event in its own queued article group (`briefs.py`), audited. Only one brief per promise may be in progress at a time.
+- **Same road as a detected change:** the dashboard starts the `write_brief` job (`promise-monitor write-brief --group ID`). The Verifier treats the links as REQUIRED sources (fetch, search-confirm, relevance, sufficiency). No citable source means an evidence lead, never a draft. Then Writer ⇄ Editor with every QA rule, and the draft goes to the review queue for approval. If the job can't run, the daily run picks the group up.
+- **Writer input:** `{"type": "coordinator_update", "description": …}`. If the chosen rating differs from the tracker's, a `status_change` is added and the closing line says "is now rated". The article may state only facts that the description states AND a cited source supports. The description is data, never instructions. The coordinator is never named.
+- **Access:** `write_brief` is the only job a coordinator may start, and only for a group on a meter they can currently see (`jobs.COORDINATOR_KINDS`).
+- A re-rating in an article does not change Promise Tracker: the coordinator still updates the rating there.
+
 ### 3.8 Notifier (support component)
 
 - After each run, send each coordinator a daily email digest: new drafts and items that need attention in their meters.
 - Send admin alerts for: run failed or degraded, schema validation errors, anomaly-guard trips, missing meters, unassigned meters, Sheets or LLM outages.
 - Transport: Gmail SMTP with an app password. If SMTP fails, the error is logged and alerting does not fail the run.
+- *As built (P7):* `notify.py` holds the `RunReport` that every stage fills in.
+  - **Coordinator digest:** one email per coordinator per run, sent only when there are new rows or stale drafts. Unassigned meters go to the admin.
+  - **Admin alert:** one email per run, sent when the run is degraded or failed, or has warnings or urgent items. "URGENT" covers 2 consecutive failed runs, a last good run more than 36 hours ago, or a Claude login failure.
+  - With no SMTP settings, `NullMailer` records skipped emails. `promise-monitor notify-test` sends a test alert.
 
 ---
 
@@ -538,6 +575,7 @@ A separate mutable table, `promise_index`, holds each promise's cursor: `latest_
   - (`group_id`, `source_id`), `role` (`promise_page`, `required` or `context`), `event_id`;
   - `relevant`, `relevance_confidence`, `reason`, `verdict`, `citable`.
 - `change_events` (as built) adds `news_item_id` (FK) and `evidence_lead` (bool) to §4.3. `change_type` gains `news_update`.
+- `change_events` (migration 0011, 2026-11-18): `change_type` gains `coordinator_update`, with `brief` (text), `brief_urls` (JSON list) and `requested_by` (FK users). See §3.10.
 
 ### 4.6 Google Sheet layout (review queue)
 
@@ -545,6 +583,20 @@ A separate mutable table, `promise_index`, holds each promise's cursor: `latest_
 - One tab per meter, named with the meter slug. Columns:
   `article_id | created_at | promise_title | change_summary | score | headline | body_markdown | word_count | sources (one per line, with verdict) | qa_flags | decision (approve/edit/reject) | decision_note | qa_result | state`
 - The pipeline only appends rows and writes to `qa_result` and `state`. Coordinators only write `body_markdown`, `decision`, and `decision_note`.
+
+*As built (P6, 2026-11-17):*
+- **Columns:** `article_id | kind | created_at | promise_title | change_summary | score | evidence_lead | headline | body_markdown | word_count | sources | qa_flags | decision | decision_note | qa_result | state`.
+- **Tabs** are named `<meter name> · <first 8 chars of meter id>` and found by that suffix.
+- **Coordinators** may edit `headline` as well as `body_markdown`.
+- **Decisions** are `approve`, `edit` or `reject`. Lead rows take `dismiss`.
+  - `edit` re-checks the edited text without approving.
+  - `approve` re-runs the deterministic QA on the sheet text first.
+  - The pipeline clears `decision` once it has acted on it, and also writes `word_count`.
+- **`kind=lead` rows** are `needs_sources` groups: evidence leads for updating the tracker.
+- **Rows are matched by `article_id`**, never by row number.
+- **All writes use RAW input**, so text is never evaluated as a formula.
+- **Approver:** we can't see who edited a cell, so `approved_by` is the meter's coordinator email from the `coordinators` tab.
+- **CLI:** `promise-monitor review-sync [--dry-run]`. Setup is `scripts/setup_google_sheets.sh`.
 
 ---
 
@@ -555,8 +607,23 @@ A separate mutable table, `promise_index`, holds each promise's cursor: `latest_
 - **Weekly full sweep:** Sundays. The Monitor sets `force_full=true` and fetches every promise's detail.
 - **Manual commands:** `promise-monitor publish` (Publisher only), `promise-monitor run --meter <id>`, `promise-monitor discover`.
 - **Concurrency:** a Postgres advisory lock stops two runs from overlapping.
+  - *As built:* `db/lock.py` is shared by every writing command. If it's busy, `run` exits 0 ("skipping") and the other commands exit 3.
+- **Scheduler (as built):** a systemd **user** timer.
+  - `OnCalendar=*-*-* 08:00:00 Africa/Lagos` with `Persistent=true`, so a run missed while the machine was off happens at the next boot.
+  - `OnFailure` sends a crash email.
+  - Exit code 2 means "failed but already reported", so it doesn't trigger a second alert.
+  - Install with `scripts/install_timer.sh`. Operations are in `docs/RUNBOOK.md`.
+- **Shadow mode (as built):** `publish.enabled: false`. Approvals are held and nothing is published. `promise-monitor shadow-report` gives the go-live verdict.
+- **Log retention:** `logs.retention_days` (90). Pruned at the start of each run.
 
 ### 5.2 Sequencing
+
+*As built (P7):* `pipeline.DailyRun` runs `heartbeat → review_pull → publish → discover → monitor(+classify) → news(+classify) → verify → write → review_push → notify`.
+- Each stage commits on its own, and a stage that raises is recorded without stopping the run.
+- If the API is down, discovery marks the run `failed` and monitoring is skipped. Publishing, review sync and alerts still happen.
+- `promise-monitor run [--full/--no-full] [--no-email]` exits 1 on `failed`.
+- The advisory lock and the LangGraph or checkpoint question are P8.
+
 1. Take the advisory lock and create a `runs` row.
 2. Publisher pass (approved drafts → site).
 3. Discovery.
@@ -564,7 +631,15 @@ A separate mutable table, `promise_index`, holds each promise's cursor: `latest_
 5. Notifier (digests and alerts).
 6. Finalize the `runs` row and release the lock.
 
-LangGraph checkpointing uses the Postgres checkpointer (`langgraph-checkpoint-postgres`) keyed by `run_id`, so a crashed run can resume.
+~~LangGraph checkpointing uses the Postgres checkpointer keyed by `run_id`, so a crashed run can resume.~~
+
+**Decision (P8, 2026-11-17, owner-approved): no LangGraph.** The pipeline is a straight sequence with no branching or cycles between agents, so a graph framework adds a dependency and a checkpoint store for little gain. Crash recovery comes from idempotency instead:
+- append-only snapshots plus the `promise_index` cursor;
+- the UNIQUE `dedupe_key` and `article_group_id`;
+- group and article states;
+- the run lock.
+
+Re-running after a crash continues where the last run stopped, and nothing is reported twice. Revisit this if agents ever need branching or human-in-the-loop pauses inside a run.
 
 ### 5.3 HTTP politeness and retries
 - **promisetracker API:**
@@ -602,7 +677,7 @@ Admin email on:
 ## 6. Writer Agent system prompt
 
 The full, ready-to-paste prompt is in **[`prompts/writer.md`](../prompts/writer.md)**. Since P5 it uses the system/`---USER---` format and states the exact word-counting rule the code enforces. The Editor's prompt is `prompts/editor.md`. It is version-controlled, and its SHA-256 is recorded on every `llm_calls` row. Key constraints:
-- 100 words (95–105), headline excluded.
+- 60–100 words, never more than 100, headline excluded (AdvoKC house style, §3.6).
 - At least 2 markdown links, using only the URLs provided.
 - Descriptive anchors.
 - Strictly neutral; attribute claims to sources.
@@ -660,12 +735,117 @@ Each phase ends with passing tests and a short demo. One phase at a time.
 | **P3 – Classifier + dedupe + News Scout** | rules, edit distance, grouping, `dedupe_key`; LLM adapter (`claude -p`) plus `llm_calls` logging; News Scout (Claude web search, code-side gate, rotation) | Re-running the same diff creates no new event; the cosmetic fixture is filtered out; a live news scan stores audited results ✅ 2026-11-17 |
 | **P4 – Verifier** | link fetch, metadata/date extraction, paywall heuristics, relevance LLM, source cache; raw-search grounding for blocked URLs and News Scout results | Fixture URLs (live, 404, paywall, PDF) get the correct verdicts ✅ 2026-11-17 |
 | **P5 – Writer + Editor** | prompts, the deterministic QA suite, the rewrite loop | ≥ 90% of fixture groups pass QA within 3 tries; every QA rule has a unit test |
-| **P6 – Sheets review loop** | gspread sync, coordinators tab, approve/edit/reject/stale handling | An end-to-end test using a test spreadsheet |
-| **P7 – Publisher + Notifier** | Jinja2 site, atomic render, Gmail digests and alerts | `site/` renders; an alert email arrives on an injected failure |
-| **P8 – Production** | cron, LangGraph Postgres checkpointer, advisory lock, log rotation, runbook, 2-week shadow run (drafts reviewed, not published) | 14 consecutive daily runs with 0 duplicate events and 0 unhandled exceptions |
+| **P6 – Sheets review loop** | gspread sync, coordinators tab, approve/edit/reject/stale handling | An end-to-end test using a test spreadsheet ✅ in-memory e2e 2026-11-17; live round trip runs once the setup wizard is done |
+| **P7 – Publisher + Notifier** | Jinja2 site, atomic render, Gmail digests and alerts; `promise-monitor run` daily pipeline | `site/` renders; an alert email arrives on an injected failure ✅ tested in-memory 2026-11-17; a live email needs SMTP settings (`notify-test`) |
+| **P8 – Production** | systemd timer (instead of cron), advisory lock, log retention, runbook, crash alert, 2-week shadow run (drafts reviewed, not published); LangGraph dropped by decision | 14 consecutive daily runs with 0 duplicate events and 0 unhandled exceptions: **in progress**, shadow period started 2026-11-18; check with `shadow-report` |
 | **P9 – Hardening (optional)** | API-key LLM backend, GitHub Pages deploy, backend asks (`/meters`, `updated_since`), more languages | As agreed with the team |
+| **P12 – Promise Tracker submissions** | Coordinator tokens, "Send to Promise Tracker" on approved articles, submission status tracking, self-update suppression (§8d) | Fake-backend e2e green; one live submission to a test promise once the backend endpoints exist |
 
 ---
+
+## 8b. Admin dashboard (P10, added 2026-11-17)
+
+**Goal:** fit the agents to each meter, and give AdvoKC staff a view of each meter's promises, with per-person access.
+
+**Decisions (owner, 2026-11-17):**
+- **Customisable per meter:** news-search context only.
+  - Official/office names and aliases, extra search terms, exclude terms.
+  - Extra local outlets, **superadmin only** (editorial balance).
+- **Promises:** the meter's promises, already captured by the Monitor, are shown read-only and given to the agents as **meter-wide context**.
+  - The News Scout searches **one meter per call**, with that meter's context and full promise list.
+  - The meter's extra outlets are allowed **for that meter only**, enforced in code.
+- **Hosting:** a local web app (FastAPI, server-rendered, no JavaScript) bound to `127.0.0.1:8800`. VPS deployment comes later; then it goes behind an HTTPS reverse proxy with `PM_DASHBOARD_HTTPS=true`.
+- **Roles:**
+  - The **superadmin** owns everything: users, primary coordinator per meter, **temporary access** grants (start/end in WAT plus a reason; they expire by themselves and can be revoked) and extra outlets.
+  - A **coordinator** sees **only** meters they're actively assigned to, primary or temporary-in-window, and edits their search context. Other meters return 404.
+- **Coordinator routing:** dashboard assignments are the source of truth for a meter once set.
+  - The digest goes to the primary coordinator **and** any active temporary cover.
+  - The sheet's `coordinators` tab mirrors them. It remains the source of truth only for meters with no dashboard assignment.
+
+**Data:** `users` (scrypt password hashes), `meter_assignments` (primary or temporary, with window, reason, granted_by, revoked_at), `meter_settings`, and an append-only `audit_log` (who, when, before → after) for every dashboard change.
+
+**Security:**
+- signed session cookie (HttpOnly, SameSite=Strict, Secure under HTTPS), 8-hour lifetime, new session on login;
+- CSRF token on every form; strict CSP (same-origin script and style only, nothing inline; JS is progressive enhancement); no framing; no caching; API docs disabled;
+- lockout after 5 failures for 15 minutes; new users get a one-time password they must change;
+- **the server refuses non-local binding without HTTPS and a secret.**
+
+**CLI:** `promise-monitor create-superadmin` and `promise-monitor dashboard [--host --port]`.
+
+### 8c. Full management dashboard (P11, 2026-11-17)
+
+**Owner decisions:** review moves **into the dashboard only** (`review.channel: dashboard`); the Google Sheet queue (§4.6, P6) is kept as a legacy channel (`sheets`) but no longer used. A superadmin can **run the pipeline now**, start **per-meter actions** and **edit global settings**.
+
+**Pages:**
+- **Overview:** open drafts, items needing attention, leads, held approvals, the week's changes and news, latest runs with warnings and errors, Claude cost, jobs.
+- **Review queue:** filter by meter or state.
+  - **Draft page:** what changed, QA issues, a preview, an editable headline and body, Save & re-check / Approve / Reject, and every source with its fetch result, verdict, relevance and reason.
+  - **Lead page:** why no draft was written, the news behind it, and Dismiss.
+- **Meters → meter → promise:** a promise's evidence timeline, snapshot history, detected changes, articles and news found.
+- **Activity:** **Updates** (every change event, filterable), **Searches** (each News Scout call with the queries it ran and every result with its accept/reject reason), **Sources** (every checked page and where it's used).
+- **Admin:**
+  - **Runs**, with details and Claude calls;
+  - **Jobs**, with output;
+  - **Settings**: whitelisted, audited overrides layered on the YAML;
+  - **Users**, with a page per user for multi-meter primary assignment, temporary cover, role, enable/disable and password reset;
+  - **LLM usage** and **Audit**.
+
+**Rules kept:**
+- Approve re-runs the code QA on the current text, and nothing auto-publishes (shadow mode still holds).
+- Coordinators get 404 for other meters' drafts, leads, promises, searches and sources.
+- Operations run a **fixed whitelist** of `promise-monitor` commands as separate processes. Targets are validated row ids. They use the same run lock; "busy" means the lock was held.
+- Settings changes are range-checked, and the whole config is re-validated before saving.
+
+**As built:**
+- `review.py` holds the review actions, shared with the daily run: `mark_stale` and `announce_new` drive the digests, which link to `review.dashboard_url`.
+- `settings_store.py` handles the overrides, applied by every pipeline command (`effective_config`).
+- `jobs.py` handles the operations.
+- New CLI options: `news-scan --meter`, `verify --group --refresh`, `redraft --article`.
+
+### 8d. Promise Tracker submissions (P12, added 2026-11-19)
+
+**Goal:** let a coordinator send an approved article to promisetracker.ng's own review queue from our dashboard, without logging into the Promise Tracker admin. The backend contract is in [`docs/integrations/promisetracker-submissions.md`](integrations/promisetracker-submissions.md). It is a **proposal**: the backend endpoints may not exist yet.
+
+**Owner decisions (2026-11-19):**
+- **The backend issues the token.** Promise Tracker gives each coordinator a personal submission token, scoped to their meter ids. The coordinator pastes it into our dashboard.
+- **Approve, then Send.** Approval is unchanged (§8c). An approved article gets a separate **Send to Promise Tracker** button. Our `site/` publishing stays as it is.
+- **Only the assigned coordinator can send.** A send needs **all** of the following:
+  1. the clicking user has an **active** assignment (primary, or temporary within its window) to the article's meter. Superadmins are **not** exempt;
+  2. the user has their **own** valid token, and `whoami` lists that meter;
+  3. the article is `approved`, and the deterministic QA (§3.6) passes on its current text;
+  4. `submissions.enabled` and `publish.enabled` are both true. During shadow mode the button shows why it's disabled, and the server refuses the send too;
+  5. the backend accepts it (its own scope check).
+  Otherwise the send is refused and the refusal goes in the audit log. Another meter's article stays a 404, as today.
+
+**Flow:**
+1. **Profile → Promise Tracker token:** the user pastes the token. We call `whoami` and store the token **encrypted** (Fernet, key `PM_TOKEN_KEY`, outside the repo) with its token id, last 4 characters, meter ids and expiry. One active token per user. Replace and Remove are audited. The token is never shown again and never logged.
+2. **Draft page** (approved articles): **Send to Promise Tracker**, with confirmation. We POST with `Idempotency-Key = article_id`, so a retry or double click can never create two submissions.
+3. **Daily run:** a new `submissions_poll` stage after `review_pull` checks open submissions (1 request per second) and records `pending_review`, `published`, `rejected` or `withdrawn`, plus the reviewer note. The coordinator's digest lists the changes.
+4. **Self-update suppression (rule 1):** when the Monitor sees a published update whose `submission_id` (or `update_id`) matches one of our submissions, the Classifier marks the event `suppressed_own_submission` and never drafts from it.
+
+**Data:**
+- **`pt_tokens`:** `id`, `user_id`, `token_ciphertext`, `token_id`, `last4`, `meter_ids` (from `whoami`), `expires_at`, `created_at`, `revoked_at`.
+- **`pt_submissions`:**
+  - `article_id` (UNIQUE), `meter_id`, `promise_id`;
+  - `submitted_by` (user), `token_id`, `payload_sha256`;
+  - `remote_id`, `remote_state`, `remote_update_id`, `reviewer_note`;
+  - `submitted_at`, `last_checked_at`, `error`.
+- `articles.state` is unchanged. Submission state lives in `pt_submissions`.
+
+**Code:**
+- `api/submissions.py` (`SubmissionClient`) is the only code that **writes** to admin.promisetracker.ng. It uses the same politeness and retry rules as §5.3, except that `POST` is retried **only** when the request has an idempotency key.
+- `submissions.py` holds the domain logic: the authorisation checks above, payload building (`body_html` rendered with markdown html disabled) and polling.
+- Config: `submissions: {enabled, base_url, poll_max_per_run}` in `config/settings.yaml`.
+- Tests use a fake backend served through `httpx.MockTransport`, never the network.
+
+**Until the backend exists:** P12 can be built and tested end to end against the fake, with `submissions.enabled: false`. Only the exit criterion "one live submission" waits for the backend.
+
+*As built (2026-11-19):*
+- **Self-update matching** doesn't depend on a new public API field. A new tracker update is ours if its id equals a submission's `remote_update_id` (from polling) **or** its text is within `classifier.own_submission_max_edit_ratio` (0.3) of the plain text we sent (`pt_submissions.body_text`). The text match covers an update published between two polls. It's stored as change type `own_submission` (logged, never an article), under the new_evidence dedupe key so it can't come back as evidence. `submission_id` on public updates is now optional in the contract.
+- **Data:** `pt_tokens.remote_token_id` (the backend's id) and `holder_name`; `pt_submissions.token_row_id` (FK `pt_tokens`) and `body_text`. A submission row is written only after the backend accepts it. Refusals and failures are audit rows (`pt_submission.refused`, `pt_submission.failed`); the route commits them.
+- **Daily run:** `submissions_poll` runs after `review_pull`. It checks up to `submissions.poll_max_per_run` open submissions, oldest-checked first, with the sender's token. A replaced or expired token leaves the status unknown and is noted for the admin. Decisions go to the meter's digest as `SENT` lines.
+- **Dashboard:** "Promise Tracker token" in the sidebar (`/account/promise-tracker`): save (checked with `whoami`), replace, remove, and "Sent by you". The approved-article page shows **Send to Promise Tracker** or the list of reasons it can't be sent yet.
+- **Migration:** 0012. **Config:** `submissions.{enabled, base_url (https only), timeout_seconds, poll_max_per_run}`, `classifier.own_submission_max_edit_ratio`, env `PM_TOKEN_KEY`.
 
 ## 9. Risks and mitigations
 
@@ -691,4 +871,9 @@ Each phase ends with passing tests and a short demo. One phase at a time.
 | R-T10 | Technical/Ethical | About half the outlets block our honest User-Agent | Never spoof a browser. Confirm blocked URLs from raw search results and label them `verified_partial` so the coordinator sees it |
 | R-T11 | Security | Fetching untrusted URLs (SSRF) | SafeFetcher: http(s) only, a public-IP check on every redirect hop, byte, time and redirect caps |
 | R-E6 | Editorial | One story produces several near-duplicate articles across promises | Each URL is accepted for one promise only (highest relevance; earlier runs win) |
+| R-T12 | Security | Formula injection through article text in Sheets; a leaked service-account key | RAW writes only; the key lives outside the repo (`~/.config/promise-monitor`, mode 600, `*.service-account.json` git-ignored); the account has no project roles and can reach only the sheets shared with it |
+| R-S1 | Security | Dashboard exposure or account takeover would let someone steer a meter's news search | Local-only by default, and the server refuses public binding without HTTPS; scrypt hashes; lockout; CSRF; strict CSP; least privilege (coordinators see only assigned meters; outlets are superadmin-only); full audit log |
+| R-E7 | Editorial | Per-meter search terms or outlets bias coverage | Terms only steer searching; every result still passes the global code gate (allowlist + meter extras, grounding, dates, relevance) and coordinator approval; outlet additions are superadmin-only and audited |
+| R-S2 | Security | A leaked submission token lets someone file updates on a meter | Scoped by the backend to one person, their meters and `submissions:write`; expires and can be revoked; encrypted at rest; never logged; our dashboard also requires an active assignment; every send is audited |
+| R-E8 | Editorial | Our own submitted update comes back as "new evidence" and is reported again | `submission_id` on published updates; the Classifier suppresses matches (§8d) |
 | R-T8 | Cost | "Free tools only" | Postgres (local), Sheets, Gmail SMTP, cron, and GitHub Pages are all free; the LLM goes through the existing subscription |

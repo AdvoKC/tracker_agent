@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from promise_monitor.agents.writer import Drafter, run_draft_loop
 from promise_monitor.config import AppConfig, load_app_config
 from promise_monitor.db.models import Article, ArticleGroup, ChangeEvent
-from promise_monitor.domain.qa import STATUS_LABELS, QAContext
+from promise_monitor.domain.qa import QAContext
 from promise_monitor.evals import build_cases, qa_context
 from promise_monitor.llm.base import LLMError
 from tests.conftest import REPO_ROOT
@@ -18,7 +18,7 @@ from tests.fakes import FakeLLM
 from tests.unit.test_monitor import FakeSite
 from tests.unit.test_monitor import session as session
 from tests.unit.test_monitor import site as site
-from tests.unit.test_qa import BODY, HEADLINE, PDF, PROMISE, VOTES
+from tests.unit.test_qa import BODY, CLOSER, HEADLINE, PDF, PROMISE, VOTES
 from tests.unit.test_verifier import (
     EVIDENCE,
     NOW,
@@ -49,8 +49,8 @@ def sample_qa(app_cfg: AppConfig) -> QAContext:
         old_status=None,
         has_status_change=False,
         banned_terms=app_cfg.banned_terms,
-        min_words=95,
-        max_words=105,
+        min_words=60,
+        max_words=100,
     )
 
 
@@ -166,14 +166,9 @@ def test_drafter_in_review_when_draft_passes(
         BODY.replace(PROMISE, promise_url)
         .replace(PDF, EVIDENCE)
         .replace(f"[House Votes and Proceedings of 12 November 2026]({VOTES})", "House records")
-        .replace("Its status remains In the Works.", "Its status moved from Not Yet Rated to Kept.")
+        .replace(CLOSER, "is now rated, \u2018KEPT.\u2019")  # the promise's rating changed to Kept
     )
-    # make the status labels match this promise's actual old status
-    old = session.scalars(
-        select(ChangeEvent.old_status).where(ChangeEvent.change_type == "status_change")
-    ).one()
-    body = body.replace("Not Yet Rated", STATUS_LABELS[old or "not_yet_rated"])
-    llm = FakeLLM(draft("House CAMA bill passes second reading", body + " More."), GOOD_EDITOR)
+    llm = FakeLLM(draft("House CAMA bill passes second reading", body), GOOD_EDITOR)
     res = drafter(session, llm, app_cfg).run()
     art = session.scalars(select(Article)).one()
     assert res.in_review == 1, art.qa_flags

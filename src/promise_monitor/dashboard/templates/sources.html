@@ -1,0 +1,24 @@
+{% extends "base.html" %}{% from "_macros.html" import verdict %}
+{% block title %}Sources{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>Sources</h1>
+<p class="sub">Every page the Verifier checked. "Blocked" sites refuse automated readers; they can still be cited when the exact URL appears in real search results ("confirmed via search").</p></div></header>
+<form class="filters" method="get">
+  <select name="status" aria-label="Fetch status"><option value="">All fetch results</option>{% for st in ['ok','blocked','paywalled','broken','unsupported','unsafe','error'] %}<option value="{{ st }}" {{ 'selected' if status_q == st }}>{{ st }}</option>{% endfor %}</select>
+  <button class="ghost" type="submit">Filter</button>
+  <span class="small">{% for k, v in totals|dictsort %}<span class="pill">{{ k }}: {{ v }}</span> {% endfor %}</span>
+</form>
+<div class="scroll"><table>
+<thead><tr><th>Source</th><th>Fetch</th><th>Date</th><th>Verdicts</th><th>Checked</th></tr></thead>
+<tbody>
+{% for r in rows %}
+<tr>
+  <td><a href="/sources/{{ r.source_id }}">{{ (r.title or r.search_title or r.url)[:110] }}</a><div class="muted small">{{ r.url[:100] }}</div></td>
+  <td class="small">{{ r.fetch_status }}{% if r.http_status %} ({{ r.http_status }}){% endif %}{% if r.search_confirmed %}<div class="muted">confirmed via search</div>{% endif %}</td>
+  <td class="small">{{ r.published_date or '' }}</td>
+  <td>{% for v, n in (verdicts.get(r.source_id) or {}).items() %}{{ verdict(v) }} ×{{ n }} {% endfor %}</td>
+  <td class="small">{{ local(r.checked_at) }}</td>
+</tr>
+{% else %}<tr><td colspan="5" class="muted">No sources checked yet.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}

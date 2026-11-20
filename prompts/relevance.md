@@ -4,6 +4,7 @@ For each source, decide whether it is **relevant evidence for the specific chang
 
 - Judge only from the title, date, publisher and text you are given. Do not use outside knowledge, and do not assume what a page says beyond what is shown.
 - If only a title is available (the page blocked our reader), judge from the title alone and lower your confidence accordingly.
+- A change may quote a **published Promise Tracker update**. That text is the tracker's own published summary of the development and counts as given text: a source that reports what the update describes is relevant, even if it names only one section or phase of the promised project.
 - `confidence` is 0–1: how sure you are about your relevant / not-relevant verdict.
 - `reason` is one short, neutral sentence.
 - Never judge whether the promise is being kept, and never consider which party or official is involved.

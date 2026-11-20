@@ -8,29 +8,41 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import structlog
 import typer
-from sqlalchemy import select
+from sqlalchemy import Engine, select
 
 from promise_monitor import __version__
+from promise_monitor.access import audit
 from promise_monitor.agents.classifier import classify
 from promise_monitor.agents.discovery import SiteDownError, apply_discovery, collect, priority_key
 from promise_monitor.agents.monitor import monitor_meter
 from promise_monitor.agents.news_scout import run_news_scout
+from promise_monitor.agents.publisher import publish_approved, render_site
+from promise_monitor.agents.review_queue import ReviewQueue
 from promise_monitor.agents.verifier import Verifier
-from promise_monitor.agents.writer import Drafter, run_draft_loop
+from promise_monitor.agents.writer import (
+    DeferredError,
+    Drafter,
+    qa_context_from_input,
+    run_draft_loop,
+)
 from promise_monitor.api.client import PromiseTrackerClient, RateLimitedError
-from promise_monitor.config import ConfigError, get_settings, load_app_config
+from promise_monitor.config import AppConfig, ConfigError, get_settings, load_app_config
 from promise_monitor.db.base import (
     DatabaseNotConfiguredError,
     make_engine,
     make_session_factory,
     ping,
 )
+from promise_monitor.db.lock import run_lock
 from promise_monitor.db.models import (
     Article,
     ArticleGroup,
@@ -39,13 +51,21 @@ from promise_monitor.db.models import (
     Meter,
     Run,
     Source,
+    User,
 )
 from promise_monitor.domain.fetch import SafeFetcher
 from promise_monitor.evals import build_cases, qa_context
+from promise_monitor.house_style import house_examples
 from promise_monitor.llm.base import LLMError
 from promise_monitor.llm.factory import make_llm
 from promise_monitor.llm.recording import RecordingLLMClient
 from promise_monitor.logging_setup import configure_logging, get_logger
+from promise_monitor.notify import Mailer, MemoryMailer, NullMailer, RunReport, make_mailer
+from promise_monitor.pipeline import DailyRun, PipelineDeps
+from promise_monitor.settings_store import effective_config
+from promise_monitor.shadow import build_report
+from promise_monitor.sheets.backend import GSpreadBackend, MemorySheets, SheetsBackend
+from promise_monitor.submissions import TokenBox, default_client_factory, token_box
 
 app = typer.Typer(
     name="promise-monitor",
@@ -58,6 +78,22 @@ app = typer.Typer(
 def _not_yet(command: str, phase: str) -> None:
     typer.echo(f"'{command}' is not implemented yet (arrives in phase {phase}).", err=True)
     raise typer.Exit(code=2)
+
+
+def _effective(engine: Engine, cfg: AppConfig) -> AppConfig:
+    """YAML config + the dashboard's audited overrides (settings_store)."""
+    with make_session_factory(engine)() as session:
+        return effective_config(session, cfg)
+
+
+@contextmanager
+def _exclusive(engine: Engine, *, quiet_skip: bool = False) -> Iterator[None]:
+    """One writer at a time (cron run vs manual commands). Busy → exit 0 (run) or 3."""
+    with run_lock(engine) as acquired:
+        if not acquired:
+            typer.echo("another promise-monitor command is running (lock held); skipping", err=True)
+            raise typer.Exit(code=0 if quiet_skip else 3)
+        yield
 
 
 @app.command()
@@ -75,12 +111,19 @@ def check_config() -> None:
     except (ConfigError, ValueError) as exc:
         typer.echo(f"config invalid: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+    try:
+        token_box(settings)
+    except ValueError as exc:
+        typer.echo(f"config invalid: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(
         f"ok: env={settings.env} states={len(cfg.states)} "
         f"banned_terms={len(cfg.banned_terms)} "
         f"database_url={'set' if settings.database_url else 'NOT SET'} "
         f"admin_email={'set' if settings.admin_email else 'NOT SET'}"
     )
+    if cfg.tunables.submissions.enabled and not settings.token_key:
+        typer.echo("warning: submissions.enabled but PM_TOKEN_KEY is not set", err=True)
 
 
 @app.command("db-check")
@@ -100,16 +143,91 @@ def db_check() -> None:
 
 @app.command()
 def run(
-    meter: Annotated[str | None, typer.Option(help="Run a single meter by id.")] = None,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="No Sheet/DB writes, no emails.")
-    ] = False,
+    full: Annotated[
+        bool | None,
+        typer.Option("--full/--no-full", help="Fetch every promise's detail (default: weekly)."),
+    ] = None,
+    no_email: Annotated[bool, typer.Option("--no-email", help="Don't send any email.")] = False,
 ) -> None:
-    """Full daily pipeline (Publisher → Discovery → per-meter subgraph → Notifier)."""
+    """The daily pipeline (cron). Stages: see promise_monitor/pipeline.py."""
     settings = get_settings()
-    configure_logging(settings.log_dir, settings.log_level)
-    get_logger("cli").info("run_requested", meter=meter, dry_run=dry_run)
-    _not_yet("run", "P1-P7")
+    configure_logging(settings.log_dir, settings.log_level, console=False)
+    cfg = load_app_config(settings.config_dir)
+    try:
+        engine = make_engine(settings.database_url)
+    except DatabaseNotConfiguredError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    cfg = _effective(engine, cfg)
+    now = datetime.now(UTC)
+    tz = ZoneInfo(cfg.tunables.timezone_display)
+    force_full = (
+        full
+        if full is not None
+        else now.astimezone(tz).weekday() == cfg.tunables.monitor.full_sweep_weekday
+    )
+    sheets: SheetsBackend | None = None
+    sheet_url: str | None = cfg.tunables.review.dashboard_url
+    if (
+        cfg.tunables.review.channel == "sheets"
+        and settings.review_spreadsheet_id
+        and settings.google_service_account_file
+    ):
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{settings.review_spreadsheet_id}/edit"
+        try:
+            sheets = GSpreadBackend(
+                settings.review_spreadsheet_id, settings.google_service_account_file
+            )
+        except Exception as exc:
+            typer.echo(f"review sheet unavailable: {type(exc).__name__}: {exc}", err=True)
+    mailer: Mailer = MemoryMailer() if no_email else make_mailer(settings)
+    box: TokenBox | None = None
+    try:
+        box = token_box(settings)
+    except ValueError as exc:
+        typer.echo(f"submissions: {exc}; status checks skipped", err=True)
+    ua_contact = f" (+contact: {settings.admin_email})" if settings.admin_email else ""
+    with (
+        PromiseTrackerClient(cfg.tunables.api, contact=settings.admin_email) as api,
+        SafeFetcher(cfg.tunables.verifier, cfg.tunables.api.user_agent + ua_contact) as fetcher,
+        _exclusive(engine, quiet_skip=True),
+        make_session_factory(engine)() as session,
+    ):
+        deps = PipelineDeps(
+            api=api,
+            fetcher=fetcher,
+            llm=make_llm(cfg.tunables.llm),
+            sheets=sheets,
+            mailer=mailer,
+            admin_email=settings.admin_email,
+            review_sheet_url=sheet_url,
+            log_dir=settings.log_dir,
+            token_box=box,
+            submission_client=default_client_factory(cfg, settings.admin_email),
+        )
+        daily = DailyRun(session, cfg, deps, now=now, force_full=force_full)
+        if (
+            cfg.tunables.review.channel == "sheets"
+            and sheets is None
+            and settings.review_spreadsheet_id
+        ):
+            daily.report.degrade("review sheet configured but could not be opened")
+        report = daily.run()
+    typer.echo(f"{report.status}: run {report.run_id}")
+    for k, v in report.stats.items():
+        typer.echo(f"  {k}: {v}")
+    for k, v in report.stage_errors.items():
+        typer.echo(f"  STAGE ERROR {k}: {v}", err=True)
+    for w in report.urgent:
+        typer.echo(f"  URGENT: {w}", err=True)
+    for w in report.warnings:
+        typer.echo(f"  warning: {w}")
+    if isinstance(mailer, NullMailer) and mailer.skipped:
+        typer.echo(f"  ({mailer.skipped} email(s) not sent: SMTP not configured)")
+    if report.status == "failed":
+        # 2 = failed but already reported by email; systemd treats it as success so its
+        # OnFailure alert only fires for crashes that never reached the Notifier.
+        raise typer.Exit(code=2)
 
 
 @app.command()
@@ -152,7 +270,7 @@ def discover(
 
     try:
         engine = make_engine(settings.database_url)
-        with make_session_factory(engine).begin() as session:
+        with _exclusive(engine), make_session_factory(engine).begin() as session:
             result = apply_discovery(session, collected, cfg, datetime.now(UTC))
     except SiteDownError as exc:
         typer.echo(str(exc), err=True)
@@ -197,8 +315,9 @@ def monitor(
     except DatabaseNotConfiguredError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
+    cfg = _effective(engine, cfg)
 
-    with make_session_factory(engine)() as session:
+    with _exclusive(engine), make_session_factory(engine)() as session:
         run_row = Run(started_at=now, trigger="cli:monitor" + (":dry-run" if dry_run else ""))
         session.add(run_row)
         session.flush()
@@ -321,6 +440,9 @@ def news_scan(
     max_calls: Annotated[
         int | None, typer.Option(help="Override news.max_calls_per_run for this run.")
     ] = None,
+    meter_filter: Annotated[
+        str | None, typer.Option("--meter", help="Only search this meter's promises.")
+    ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Search and classify, then roll back DB writes.")
     ] = False,
@@ -337,9 +459,10 @@ def news_scan(
     except DatabaseNotConfiguredError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
+    cfg = _effective(engine, cfg)
 
     now = datetime.now(UTC)
-    with make_session_factory(engine)() as session:
+    with _exclusive(engine), make_session_factory(engine)() as session:
         run_row = Run(started_at=now, trigger="cli:news-scan" + (":dry-run" if dry_run else ""))
         session.add(run_row)
         session.flush()
@@ -356,6 +479,7 @@ def news_scan(
             cfg=cfg.tunables.news,
             sources=cfg.news_sources,
             max_calls=max_calls,
+            meter_id=uuid.UUID(meter_filter) if meter_filter else None,
         )
         typer.echo(
             f"searched={scout.searched} calls={scout.calls} failed_calls={scout.failed_calls} "
@@ -411,6 +535,10 @@ def news_scan(
 @app.command()
 def verify(
     limit: Annotated[int | None, typer.Option(help="Max article groups this run.")] = None,
+    group_id: Annotated[
+        str | None, typer.Option("--group", help="Re-verify just this article group.")
+    ] = None,
+    refresh: Annotated[bool, typer.Option("--refresh", help="Ignore the source cache.")] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Verify, print, then roll back DB writes.")
     ] = False,
@@ -424,12 +552,13 @@ def verify(
     except DatabaseNotConfiguredError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
+    cfg = _effective(engine, cfg)
 
     now = datetime.now(UTC)
     ua = cfg.tunables.api.user_agent + (
         f" (+source verification; contact: {settings.admin_email})" if settings.admin_email else ""
     )
-    with make_session_factory(engine)() as session:
+    with _exclusive(engine), make_session_factory(engine)() as session:
         run_row = Run(started_at=now, trigger="cli:verify" + (":dry-run" if dry_run else ""))
         session.add(run_row)
         session.flush()
@@ -446,7 +575,15 @@ def verify(
                 public_promise_url=cfg.tunables.api.public_promise_url,
                 now=now,
             )
-            res = verifier.run(limit)
+            only = None
+            if group_id:
+                only = uuid.UUID(group_id)
+                try:
+                    verifier.requeue(only, refresh=refresh)
+                except ValueError as exc:
+                    typer.echo(str(exc), err=True)
+                    raise typer.Exit(code=1) from exc
+            res = verifier.run(limit, only=only)
 
         for gid in res.group_ids:
             group = session.get(ArticleGroup, gid)
@@ -491,8 +628,16 @@ def write(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Draft and print, then roll back DB writes.")
     ] = False,
+    group: Annotated[
+        str | None, typer.Option("--group", help="Draft only this verified article group.")
+    ] = None,
 ) -> None:
     """Draft articles for verified groups: Writer → QA → Editor, ≤3 rewrites (PRD §3.5-3.6)."""
+    try:
+        only = uuid.UUID(group) if group else None
+    except ValueError as exc:
+        typer.echo("invalid group id", err=True)
+        raise typer.Exit(code=1) from exc
     settings = get_settings()
     configure_logging(settings.log_dir, settings.log_level, console=False)
     cfg = load_app_config(settings.config_dir)
@@ -501,8 +646,9 @@ def write(
     except DatabaseNotConfiguredError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
+    cfg = _effective(engine, cfg)
     now = datetime.now(UTC)
-    with make_session_factory(engine)() as session:
+    with _exclusive(engine), make_session_factory(engine)() as session:
         run_row = Run(started_at=now, trigger="cli:write" + (":dry-run" if dry_run else ""))
         session.add(run_row)
         session.flush()
@@ -518,7 +664,7 @@ def write(
             public_promise_url=cfg.tunables.api.public_promise_url,
             now=now,
         )
-        res = drafter.run(limit)
+        res = drafter.run(limit, only=only)
         for aid in res.article_ids:
             art = session.get(Article, aid)
             assert art is not None
@@ -548,6 +694,158 @@ def write(
         raise typer.Exit(code=1)
 
 
+@app.command("write-brief")
+def write_brief(
+    group_id: Annotated[str, typer.Option("--group", help="Article group of the brief.")],
+) -> None:
+    """Verify the sources of one coordinator brief, then draft its article (dashboard job)."""
+    settings = get_settings()
+    configure_logging(settings.log_dir, settings.log_level, console=False)
+    cfg = load_app_config(settings.config_dir)
+    try:
+        engine = make_engine(settings.database_url)
+    except DatabaseNotConfiguredError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    cfg = _effective(engine, cfg)
+    try:
+        gid = uuid.UUID(group_id)
+    except ValueError as exc:
+        typer.echo("invalid group id", err=True)
+        raise typer.Exit(code=1) from exc
+    now = datetime.now(UTC)
+    ua = cfg.tunables.api.user_agent + (
+        f" (+source verification; contact: {settings.admin_email})" if settings.admin_email else ""
+    )
+    with _exclusive(engine), make_session_factory(engine)() as session:
+        group = session.get(ArticleGroup, gid)
+        if group is None or group.state != "queued":
+            typer.echo("brief not found, or already processed", err=True)
+            raise typer.Exit(code=1)
+        run_row = Run(started_at=now, trigger="cli:write-brief")
+        session.add(run_row)
+        session.flush()
+        session.commit()
+        structlog.contextvars.bind_contextvars(run_id=str(run_row.run_id))
+        llm = RecordingLLMClient(make_llm(cfg.tunables.llm), session, run_row.run_id)
+        typer.echo("checking the source links…")
+        with SafeFetcher(cfg.tunables.verifier, ua) as fetcher:
+            vres = Verifier(
+                session,
+                fetcher,
+                llm,
+                cfg=cfg.tunables.verifier,
+                public_promise_url=cfg.tunables.api.public_promise_url,
+                now=now,
+            ).run(only=gid)
+        session.commit()
+        session.refresh(group)
+        for ags, src in session.execute(
+            select(ArticleGroupSource, Source)
+            .join(Source, Source.source_id == ArticleGroupSource.source_id)
+            .where(ArticleGroupSource.group_id == gid)
+        ):
+            typer.echo(f"  {ags.verdict:<16} {ags.role:<12} {src.url[:100]}")
+        for note in group.notes or []:
+            typer.echo(f"  note: {note[:160]}")
+        status, code = "ok", 0
+        if group.state == "verified":
+            typer.echo("sources verified; drafting the article…")
+            drafter = Drafter(
+                session,
+                llm,
+                cfg=cfg.tunables.article,
+                banned_terms=cfg.banned_terms,
+                public_promise_url=cfg.tunables.api.public_promise_url,
+                now=now,
+            )
+            try:
+                art = drafter.draft(group)
+                typer.echo(f"[{art.state}] {art.word_count} words  article={art.article_id}")
+                typer.echo(f"  HEADLINE: {art.headline}\n  {art.body_markdown}")
+                for flag in art.qa_flags:
+                    typer.echo(f"  FLAG: {flag}")
+            except (LLMError, DeferredError) as exc:
+                status, code = "degraded", 1
+                typer.echo(f"drafting deferred to the next daily run: {exc}", err=True)
+        elif group.state == "needs_sources":
+            typer.echo("no source could be verified: saved as an evidence lead, not drafted")
+        else:
+            status, code = "degraded", 1
+            typer.echo(f"verification deferred (state {group.state}); the daily run retries")
+        run_row.status = status
+        run_row.finished_at = datetime.now(UTC)
+        run_row.stats = {"verify": {"deferred": vres.deferred, "llm_calls": vres.llm_calls}}
+        session.commit()
+        structlog.contextvars.clear_contextvars()
+    if code:
+        raise typer.Exit(code=code)
+
+
+@app.command()
+def redraft(
+    article: Annotated[str, typer.Option(help="Article id to redraft (still under review).")],
+) -> None:
+    """Write a fresh draft for an article still under review (same sources, same QA loop)."""
+    settings = get_settings()
+    configure_logging(settings.log_dir, settings.log_level, console=False)
+    cfg = load_app_config(settings.config_dir)
+    try:
+        engine = make_engine(settings.database_url)
+    except DatabaseNotConfiguredError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    cfg = _effective(engine, cfg)
+    now = datetime.now(UTC)
+    with _exclusive(engine), make_session_factory(engine)() as session:
+        art = session.get(Article, uuid.UUID(article))
+        if art is None or art.state not in ("in_review", "needs_attention", "stale"):
+            typer.echo("article not found, or no longer under review", err=True)
+            raise typer.Exit(code=1)
+        run_row = Run(started_at=now, trigger="cli:redraft")
+        session.add(run_row)
+        session.flush()
+        llm = RecordingLLMClient(make_llm(cfg.tunables.llm), session, run_row.run_id)
+        qa = qa_context_from_input(art.writer_input, cfg.tunables.article, cfg.banned_terms)
+        examples = house_examples(
+            session,
+            art.meter_id,
+            cfg.tunables.article.house_examples,
+            exclude_promise=art.promise_id,
+        )
+        try:
+            loop = run_draft_loop(
+                llm,
+                art.writer_input,
+                qa,
+                cfg.tunables.article,
+                subject_id=str(art.article_group_id),
+                examples=examples,
+            )
+        except LLMError as exc:
+            session.commit()
+            typer.echo(f"Claude unavailable: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        before = {"headline": art.headline, "body_markdown": art.body_markdown}
+        art.headline, art.body_markdown = loop.headline, loop.body
+        art.word_count = loop.report.word_count if loop.report else 0
+        art.qa_flags, art.rewrite_count = loop.issues, loop.attempts - 1
+        art.state = "in_review" if loop.passed else "needs_attention"
+        audit(
+            session,
+            None,
+            "article.redraft",
+            "article",
+            art.article_id,
+            now,
+            before=before,
+            after={"headline": art.headline, "passed": loop.passed},
+        )
+        run_row.status, run_row.finished_at = "ok", datetime.now(UTC)
+        session.commit()
+    typer.echo(f"redrafted: {art.state} ({art.word_count} words, {loop.attempts} attempt(s))")
+
+
 @app.command("eval-writer")
 def eval_writer(
     cases: Annotated[int | None, typer.Option(help="Run only the first N cases.")] = None,
@@ -563,7 +861,9 @@ def eval_writer(
     for case in all_cases:
         qa = qa_context(case, cfg.banned_terms, acfg.min_words, acfg.max_words)
         try:
-            loop = run_draft_loop(llm, case.writer_input, qa, acfg, subject_id=case.name)
+            loop = run_draft_loop(
+                llm, case.writer_input, qa, acfg, subject_id=case.name, examples=case.examples
+            )
         except LLMError as exc:
             typer.echo(f"ERROR {case.name}: {exc}", err=True)
             results.append({"case": case.name, "passed": False, "error": str(exc)})
@@ -597,10 +897,264 @@ def eval_writer(
         raise typer.Exit(code=1)
 
 
+@app.command("review-sync")
+def review_sync(
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Use an in-memory sheet and roll back DB writes."),
+    ] = False,
+) -> None:
+    """Sync the coordinators' Google Sheet: read decisions, mark stale, push new rows."""
+    settings = get_settings()
+    configure_logging(settings.log_dir, settings.log_level, console=False)
+    cfg = load_app_config(settings.config_dir)
+    try:
+        engine = make_engine(settings.database_url)
+    except DatabaseNotConfiguredError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    cfg = _effective(engine, cfg)
+
+    sheets: SheetsBackend
+    if dry_run:
+        sheets = MemorySheets()
+    else:
+        if not (settings.review_spreadsheet_id and settings.google_service_account_file):
+            typer.echo(
+                "PM_REVIEW_SPREADSHEET_ID and PM_GOOGLE_SERVICE_ACCOUNT_FILE must be set "
+                "(see .env.example; run scripts/setup_google_sheets.sh)",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        try:
+            sheets = GSpreadBackend(
+                settings.review_spreadsheet_id, settings.google_service_account_file
+            )
+        except Exception as exc:
+            typer.echo(f"cannot open the review spreadsheet: {type(exc).__name__}: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+    now = datetime.now(UTC)
+    with _exclusive(engine), make_session_factory(engine)() as session:
+        res = ReviewQueue(session, sheets, cfg, now=now, admin_email=settings.admin_email).sync()
+        if dry_run:
+            assert isinstance(sheets, MemorySheets)
+            for title, grid in sheets.tabs.items():
+                typer.echo(f"[tab] {title}: {len(grid) - 1} row(s)")
+            session.rollback()
+            typer.echo("dry run: in-memory sheet, all DB writes rolled back")
+        else:
+            session.commit()
+    typer.echo(
+        f"pushed_articles={res.pushed_articles} pushed_leads={res.pushed_leads} "
+        f"approved={len(res.approved)} rejected={len(res.rejected)} "
+        f"qa_failed={len(res.qa_failed)} edited_ok={len(res.edited_ok)} "
+        f"dismissed_leads={len(res.dismissed_leads)} stale={len(res.stale)} "
+        f"unknown_decisions={res.unknown_decisions}"
+    )
+    if res.unassigned_meters:
+        typer.echo(
+            f"{len(res.unassigned_meters)} active meter(s) have no coordinator email "
+            "(fill the 'coordinators' tab): "
+            + ", ".join(res.unassigned_meters[:5])
+            + ("…" if len(res.unassigned_meters) > 5 else "")
+        )
+
+
 @app.command()
-def publish() -> None:
-    """Publish coordinator-approved articles to site/."""
-    _not_yet("publish", "P7")
+def publish(
+    out: Annotated[
+        Path | None, typer.Option(help="Output directory (default: site.out_dir).")
+    ] = None,
+) -> None:
+    """Publish coordinator-approved articles and re-render the static site."""
+    settings = get_settings()
+    configure_logging(settings.log_dir, settings.log_level, console=False)
+    cfg = load_app_config(settings.config_dir)
+    try:
+        engine = make_engine(settings.database_url)
+    except DatabaseNotConfiguredError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    cfg = _effective(engine, cfg)
+    now = datetime.now(UTC)
+    if not cfg.tunables.publish.enabled:
+        typer.echo(
+            "shadow mode: publish.enabled is false in config/settings.yaml; nothing published"
+        )
+        return
+    with _exclusive(engine), make_session_factory(engine)() as session:
+        ids = publish_approved(session, now)
+        res = render_site(session, cfg, now, out)
+        session.commit()
+    typer.echo(
+        f"published {len(ids)} new article(s); rendered {res.pages} page(s) to {res.out_dir}"
+    )
+
+
+@app.command("notify-test")
+def notify_test() -> None:
+    """Send a test admin alert (a simulated failed run) to PM_ADMIN_EMAIL via SMTP."""
+    settings = get_settings()
+    if not settings.admin_email:
+        typer.echo("PM_ADMIN_EMAIL is not set", err=True)
+        raise typer.Exit(code=1)
+    mailer = make_mailer(settings)
+    if isinstance(mailer, NullMailer):
+        typer.echo(
+            "SMTP not configured (PM_SMTP_USER / PM_SMTP_PASSWORD); see .env.example", err=True
+        )
+        raise typer.Exit(code=1)
+    report = RunReport(run_id=uuid.uuid4(), started_at=datetime.now(UTC), status="failed")
+    report.stage_errors["discover"] = "TEST: injected failure (promise-monitor notify-test)"
+    report.urgent.append("TEST alert: if you can read this, admin alerts work.")
+    try:
+        mailer.send(
+            [settings.admin_email],
+            f"[promise-monitor] TEST alert {report.started_at:%Y-%m-%d %H:%M}Z",
+            "This is a test of promise-monitor admin alerts.\n\n"
+            + "\n".join(f" - {k}: {v}" for k, v in report.stage_errors.items())
+            + "\n - "
+            + report.urgent[0],
+        )
+    except Exception as exc:
+        typer.echo(f"sending failed: {type(exc).__name__}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo("sent: check the admin inbox (and spam folder)")
+
+
+@app.command()
+def alert(
+    unit: Annotated[str, typer.Option(help="The systemd unit that failed.")] = "promise-monitor",
+) -> None:
+    """Email the admin that the run CRASHED before it could report (systemd OnFailure)."""
+    settings = get_settings()
+    lines = [
+        f"{unit} exited unexpectedly at {datetime.now(UTC):%Y-%m-%d %H:%M}Z, before it could send",
+        "its own report. Nothing was lost: the next run continues from the stored state.",
+        "",
+        f"Check: journalctl --user -u {unit} -n 100",
+    ]
+    today = settings.log_dir / f"{datetime.now(UTC):%Y-%m-%d}.jsonl"
+    if today.exists():
+        errors = [
+            ln for ln in today.read_text(encoding="utf-8").splitlines() if '"level": "error"' in ln
+        ]
+        if errors:
+            lines += ["", "Last errors in today's log:", *[e[:400] for e in errors[-10:]]]
+    mailer = make_mailer(settings)
+    if not settings.admin_email or isinstance(mailer, NullMailer):
+        typer.echo("\n".join(lines))
+        typer.echo("(email not configured: PM_ADMIN_EMAIL / PM_SMTP_*)", err=True)
+        raise typer.Exit(code=1)
+    mailer.send([settings.admin_email], f"[promise-monitor] CRASH: {unit}", "\n".join(lines))
+    typer.echo("alert sent")
+
+
+@app.command("shadow-report")
+def shadow_report(
+    days: Annotated[int, typer.Option(help="Window to report on.")] = 14,
+) -> None:
+    """Summarise the shadow period and say whether publishing can be switched on (P8 exit)."""
+    settings = get_settings()
+    try:
+        engine = make_engine(settings.database_url)
+    except DatabaseNotConfiguredError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    with make_session_factory(engine)() as session:
+        rep = build_report(session, datetime.now(UTC), days)
+    typer.echo("\n".join(rep.lines))
+    if not rep.passed:
+        raise typer.Exit(code=1)
+
+
+@app.command("create-superadmin")
+def create_superadmin(
+    email: Annotated[str, typer.Option(prompt=True, help="Login email.")],
+    name: Annotated[str, typer.Option(prompt=True, help="Display name.")],
+) -> None:
+    """Create a dashboard superadmin (password asked interactively, never on the command line)."""
+    from promise_monitor import access
+
+    settings = get_settings()
+    try:
+        engine = make_engine(settings.database_url)
+    except DatabaseNotConfiguredError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    password = typer.prompt(
+        f"Password (at least {access.MIN_PASSWORD_LEN} characters)",
+        hide_input=True,
+        confirmation_prompt=True,
+    )
+    with make_session_factory(engine)() as session:
+        try:
+            user = access.create_user(
+                session,
+                email=email,
+                name=name,
+                role="superadmin",
+                password=password,
+                actor=None,
+                now=datetime.now(UTC),
+            )
+        except access.AccessError as exc:
+            typer.echo(f"not created: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        session.commit()
+    typer.echo(f"superadmin {user.email} created; sign in at the dashboard")
+
+
+@app.command()
+def dashboard(
+    host: Annotated[
+        str, typer.Option(help="Bind address. Keep 127.0.0.1 unless behind HTTPS.")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port.")] = 8800,
+) -> None:
+    """Serve the admin dashboard (per-meter search context, promises, users and access)."""
+    import uvicorn
+
+    from promise_monitor.dashboard.app import create_app
+
+    settings = get_settings()
+    configure_logging(settings.log_dir, settings.log_level, console=True)
+    cfg = load_app_config(settings.config_dir)
+    try:
+        engine = make_engine(settings.database_url)
+    except DatabaseNotConfiguredError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    local = host in ("127.0.0.1", "localhost", "::1")
+    if not local and not (settings.dashboard_https and settings.dashboard_secret):
+        typer.echo(
+            "refusing to listen on a non-local address without HTTPS: put the dashboard behind an "
+            "HTTPS reverse proxy and set PM_DASHBOARD_HTTPS=true and PM_DASHBOARD_SECRET",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if not settings.dashboard_secret:
+        typer.echo(
+            "note: PM_DASHBOARD_SECRET is not set; everyone is signed out when it restarts",
+            err=True,
+        )
+    factory = make_session_factory(engine)
+    with factory() as session:
+        if session.scalars(select(User).limit(1)).first() is None:
+            typer.echo(
+                "no users yet: run `uv run promise-monitor create-superadmin` first", err=True
+            )
+            raise typer.Exit(code=1)
+    typer.echo(f"dashboard on http://{host}:{port}  (Ctrl-C to stop)")
+    uvicorn.run(
+        create_app(factory, cfg, settings),
+        host=host,
+        port=port,
+        log_level="warning",
+        proxy_headers=settings.dashboard_https,
+        server_header=False,
+    )
 
 
 if __name__ == "__main__":

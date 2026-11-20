@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block content %}
+<div class="login">
+  <div class="login-brand">
+    <span class="logo lg" role="img" aria-label="AdvoKC"></span>
+    <div class="login-title">Promise Monitor<div class="muted small">Promise Tracker review console</div></div>
+  </div>
+  <div class="card">
+    <h1>Sign in</h1>
+    <p class="sub">Review and manage promise updates.</p>
+    <form method="post" action="/login">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label for="email">Email</label>
+      <input id="email" type="email" name="email" autocomplete="username" required autofocus>
+      <label for="password">Password</label>
+      <input id="password" type="password" name="password" autocomplete="current-password" required>
+      <div class="actions"><button type="submit" class="block">Sign in</button></div>
+    </form>
+  </div>
+  <p class="muted small center">Internal tool · access is granted by the superadmin.</p>
+</div>
+{% endblock %}

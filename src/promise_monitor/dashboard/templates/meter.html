@@ -1,0 +1,122 @@
+{% extends "base.html" %}{% from "_macros.html" import badge, state, job_button %}
+{% block title %}{{ meter.name }}{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>{{ meter.name }}</h1>
+<div class="meta"><span class="chip">{{ where }}</span><span class="chip">{{ meter.meter_type }}</span>{% if meter.registry_status != 'active' %}<span class="pill">{{ meter.registry_status }}</span>{% endif %}
+<a class="chip link" href="/review?meter={{ meter.id }}">Review queue</a><a class="chip link" href="/updates?meter={{ meter.id }}">Updates</a><a class="chip link" href="/searches?meter={{ meter.id }}">Searches</a><a class="chip link" href="{{ meter.public_url }}" rel="noopener noreferrer" target="_blank">Open on Promise Tracker ↗</a></div></div></header>
+{% if user.role == 'superadmin' %}
+<div class="actions toolbar">
+  {{ job_button('monitor_meter', meter.id, 'Re-check promises now', csrf, '/meters/' ~ meter.id) }}
+  {{ job_button('news_scan_meter', meter.id, 'Re-scan news now', csrf, '/meters/' ~ meter.id) }}
+</div>
+{% endif %}
+
+<div class="grid2">
+<section class="card">
+  <h2>News search context</h2>
+  <p class="muted small">Given to the News Scout (with this meter's promise list) whenever it searches news for this meter. Neutral facts only: names, places, project names. Applies from the next run.</p>
+  {% if can_edit %}
+  <form method="post" action="/meters/{{ meter.id }}/settings">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="aliases">Official / office names <span class="hint">one per line, e.g. "Governor Abba Kabir Yusuf", "Kano State Government"</span></label>
+    <textarea id="aliases" name="official_aliases">{{ settings.official_aliases|join('\n') }}</textarea>
+    <label for="terms">Extra search terms <span class="hint">one per line: project names, local place names, agencies</span></label>
+    <textarea id="terms" name="search_terms">{{ settings.search_terms|join('\n') }}</textarea>
+    <label for="exclude">Exclude terms <span class="hint">one per line: names or topics that cause false matches</span></label>
+    <textarea id="exclude" name="exclude_terms">{{ settings.exclude_terms|join('\n') }}</textarea>
+    {% if user.role == 'superadmin' %}
+    <label for="outlets">Extra outlets for this meter <span class="hint">superadmin only · one per line: <code>domain | Outlet name</code>, e.g. <code>kanofocus.com | Kano Focus</code></span></label>
+    <textarea id="outlets" name="extra_outlets">{% for o in settings.extra_outlets %}{{ o.domain }} | {{ o.name }}
+{% endfor %}</textarea>
+    {% else %}
+    <label>Extra outlets <span class="hint">set by the superadmin</span></label>
+    <p class="small">{% for o in settings.extra_outlets %}{{ o.name }} ({{ o.domain }}){{ ', ' if not loop.last }}{% else %}<span class="muted">none</span>{% endfor %}</p>
+    {% endif %}
+    <div class="actions"><button type="submit">Save search context</button></div>
+    {% if updated %}<p class="muted small">Last changed {{ updated }}</p>{% endif %}
+  </form>
+  {% else %}
+  <dl class="kv">
+    <dt>Names</dt><dd>{{ settings.official_aliases|join(', ') or '—' }}</dd>
+    <dt>Terms</dt><dd>{{ settings.search_terms|join(', ') or '—' }}</dd>
+    <dt>Exclude</dt><dd>{{ settings.exclude_terms|join(', ') or '—' }}</dd>
+  </dl>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Coordinators</h2>
+  {% if assignments %}
+  <table>
+    <thead><tr><th>Who</th><th>Kind</th><th>Window (WAT)</th>{% if user.role == 'superadmin' %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+    {% for a in assignments %}
+    <tr>
+      <td>{% if user.role == 'superadmin' %}<a href="/admin/users/{{ a.user_id }}">{{ a.name }}</a>{% else %}{{ a.name }}{% endif %}<div class="muted small">{{ a.email }}</div></td>
+      <td><span class="pill">{{ a.kind }}</span>{% if a.upcoming %} <span class="pill">upcoming</span>{% endif %}{% if a.reason %}<div class="muted small">{{ a.reason }}</div>{% endif %}</td>
+      <td class="small">{{ a.window }}</td>
+      {% if user.role == 'superadmin' %}<td><form method="post" action="/assignments/{{ a.id }}/revoke"><input type="hidden" name="back" value="/meters/{{ meter.id }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger" type="submit" data-confirm="Revoke this access now?">Revoke</button></form></td>{% endif %}
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No coordinator assigned. Digests go to the admin.</p>{% endif %}
+
+  {% if user.role == 'superadmin' %}
+  <h2>Set primary coordinator</h2>
+  {% if coordinators %}
+  <form method="post" action="/meters/{{ meter.id }}/primary" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <select name="user_id" aria-label="Coordinator">{% for c in coordinators %}<option value="{{ c.user_id }}">{{ c.name }} · {{ c.email }}</option>{% endfor %}</select>
+    <div class="shrink"><button type="submit">Make primary</button></div>
+  </form>
+  <h2>Grant temporary access</h2>
+  <form method="post" action="/meters/{{ meter.id }}/grant">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="tuser">Coordinator</label>
+    <select id="tuser" name="user_id">{% for c in coordinators %}<option value="{{ c.user_id }}">{{ c.name }} · {{ c.email }}</option>{% endfor %}</select>
+    <div class="row">
+      <div><label for="start">From (WAT)</label><input id="start" type="datetime-local" name="starts_at" value="{{ now_local }}" required></div>
+      <div><label for="end">Until (WAT)</label><input id="end" type="datetime-local" name="ends_at" required></div>
+    </div>
+    <label for="reason">Reason</label>
+    <input id="reason" type="text" name="reason" placeholder="Covering for … on leave" required maxlength="500">
+    <div class="actions"><button type="submit">Grant access</button></div>
+  </form>
+  {% else %}<p class="muted">Create a coordinator account first (Users).</p>{% endif %}
+  {% endif %}
+</section>
+</div>
+
+<h2 class="section">Promises on this meter <span class="count">{{ promises|length }}</span></h2>
+<p class="muted small">From the tracker snapshots the monitor keeps. The News Scout receives this list as context for the meter.</p>
+<div class="scroll"><table>
+  <thead><tr><th>Promise</th><th>Status</th><th>Category</th><th>Evidence updates</th><th>Last tracker update</th><th>News last searched</th></tr></thead>
+  <tbody>
+  {% for p in promises %}
+  <tr>
+    <td><a href="/promises/{{ p.id }}">{{ p.title }}</a>{% if not p.present %} <span class="pill">removed</span>{% endif %}{% if p.news %} <span class="pill st-accepted">{{ p.news }} news</span>{% endif %}{% if p.present %}<div class="small"><a href="/promises/{{ p.id }}#write">+ Write update</a></div>{% endif %}</td>
+    <td>{{ badge(p.status) }}</td>
+    <td class="small">{{ p.category or '—' }}</td>
+    <td>{{ p.updates }}</td>
+    <td class="small">{{ p.last_update or '—' }}</td>
+    <td class="small">{{ p.searched or 'never' }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">No promises captured yet (the meter may be empty, or still awaiting its first baseline).</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+
+<h2>Recent activity</h2>
+<div class="scroll"><table>
+  <thead><tr><th>When (WAT)</th><th>Change</th><th>Promise</th><th>Score</th><th>State</th></tr></thead>
+  <tbody>
+  {% for e in events %}
+  <tr><td class="small">{{ e.when }}</td><td>{{ e.type }}</td><td class="small"><a href="/promises/{{ e.promise_id }}">{{ e.promise }}</a></td><td>{{ e.score }}</td><td>{{ state(e.state) }}</td></tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">No changes detected yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}

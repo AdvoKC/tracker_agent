@@ -174,7 +174,13 @@ def test_recording_success_failure_and_auth_lockout(db: Session) -> None:
         ),
         (
             "news_scout",
-            {"allowed_domains": "a.ng", "max_per_promise": "3", "today": "d", "promises": "P1"},
+            {
+                "allowed_domains": "a.ng",
+                "max_per_promise": "3",
+                "today": "d",
+                "meter_context": "m",
+                "promises": "P1",
+            },
         ),
     ],
 )

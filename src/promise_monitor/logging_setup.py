@@ -7,8 +7,9 @@ so every line carries them (PRD §5.5).
 from __future__ import annotations
 
 import logging
+import re
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import structlog
@@ -91,3 +92,26 @@ def configure_logging(log_dir: Path, level: str = "INFO", *, console: bool = Tru
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     logger: structlog.stdlib.BoundLogger = structlog.stdlib.get_logger(name)
     return logger
+
+
+_LOG_DATE = re.compile(r"(\d{4})-?(\d{2})-?(\d{2})")
+
+
+def prune_logs(log_dir: Path | None, retention_days: int, now: datetime | None = None) -> int:
+    """Delete dated log files (YYYY-MM-DD.jsonl, eval-writer-*.json) past retention."""
+    if log_dir is None or not log_dir.is_dir():
+        return 0
+    cutoff = (now or datetime.now(UTC)).date() - timedelta(days=retention_days)
+    removed = 0
+    for f in log_dir.iterdir():
+        m = _LOG_DATE.search(f.name)
+        if not m or not f.is_file():
+            continue
+        try:
+            day = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            continue
+        if day < cutoff:
+            f.unlink()
+            removed += 1
+    return removed

@@ -4,6 +4,9 @@ Per promise per run:
 - tracker diffs → status_change / new_evidence (one per update) / new_promise / cosmetic /
   substantive_edit; removed promises → promise_removed;
 - News Scout findings → news_update (evidence lead for coordinators);
+- a new tracker update that IS one of our own submissions (PRD §8d: its id is the
+  ``remote_update_id`` Promise Tracker reported, or its text is within
+  ``own_submission_max_edit_ratio`` of the body we sent) → own_submission, logged only;
 - article-type events get a rule-based score; the LLM may adjust it (±max) ONLY when the
   adjustment could flip the article decision (saves subscription usage);
 - status_change always qualifies; other article types qualify at score ≥ threshold;
@@ -29,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from promise_monitor.agents.monitor import RawDiff
 from promise_monitor.config import ClassifierConfig
-from promise_monitor.db.models import ChangeEvent, Meter, PromiseSnapshot
+from promise_monitor.db.models import ChangeEvent, Meter, PromiseSnapshot, PtSubmission
 from promise_monitor.domain.hashing import sha256_hex
 from promise_monitor.llm.base import LLMClient, LLMError, LLMRequest
 from promise_monitor.llm.prompts import load_prompt
@@ -103,6 +106,7 @@ class _Draft:
     score_delta: int = 0
     score_reason: str = "rule-based"
     evidence_lead: bool = False
+    update_text: str = ""  # new_evidence only: the update's full text (own-submission match)
 
     @property
     def is_article_type(self) -> bool:
@@ -188,12 +192,13 @@ def _drafts_for_diff(
 
     new_updates = {u["update_id"]: u for u in new.get("updates") or []}
     for uid in d.added_update_ids:
-        text = str(new_updates.get(uid, {}).get("text", ""))[:400]
+        full = str(new_updates.get(uid, {}).get("text", ""))
         drafts.append(
             draft(
                 change_type="new_evidence",
                 dedupe_key=key(pid, "new_evidence", uid),
-                describe=f"New evidence update: {text}",
+                describe=f"New evidence update: {full[:400]}",
+                update_text=full,
                 new_status=new.get("status"),
                 added_update_ids=[uid],
                 fields_changed=["updates"],
@@ -282,6 +287,7 @@ def classify(
         prev = contents.get(d.prev_snapshot_id, {}) if d.prev_snapshot_id else {}
         latest[d.promise_id] = new
         by_promise[d.promise_id].extend(_drafts_for_diff(d, prev, new, cfg))
+    _mark_own_submissions(session, by_promise, cfg)
     for f in news:
         by_promise[f.promise_id].append(_draft_for_news(f, cfg))
     for pid in removed:
@@ -418,6 +424,49 @@ def classify(
         llm_calls=result.llm_calls,
     )
     return result
+
+
+def _mark_own_submissions(
+    session: Session, by_promise: dict[uuid.UUID, list[_Draft]], cfg: ClassifierConfig
+) -> None:
+    """Relabel new_evidence that is our own published submission (never reported again).
+
+    The dedupe key stays the new_evidence key, so the update can't come back as evidence later.
+    """
+    pids = {
+        pid
+        for pid, drafts in by_promise.items()
+        if any(d.change_type == "new_evidence" for d in drafts)
+    }
+    if not pids:
+        return
+    ids: dict[uuid.UUID, set[str]] = defaultdict(set)
+    texts: dict[uuid.UUID, list[str]] = defaultdict(list)
+    for pid, upd, text in session.execute(
+        select(
+            PtSubmission.promise_id, PtSubmission.remote_update_id, PtSubmission.body_text
+        ).where(PtSubmission.promise_id.in_(pids))
+    ):
+        if upd:
+            ids[pid].add(upd)
+        texts[pid].append(text)
+    for pid in pids:
+        for dr in by_promise[pid]:
+            if dr.change_type != "new_evidence":
+                continue
+            by_id = bool(set(dr.added_update_ids) & ids[pid])
+            by_text = any(
+                edit_ratio(dr.update_text, t) <= cfg.own_submission_max_edit_ratio
+                for t in texts[pid]
+                if t and dr.update_text
+            )
+            if by_id or by_text:
+                dr.change_type = "own_submission"
+                dr.score_base = 0
+                dr.score_reason = (
+                    "logged only: our own submission, published by Promise Tracker "
+                    f"(matched by {'update id' if by_id else 'text'})"
+                )
 
 
 def _latest_content(session: Session, promise_id: uuid.UUID) -> dict[str, Any] | None:

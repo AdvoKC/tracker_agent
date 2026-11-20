@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% from "_macros.html" import state %}
+{% block title %}Jobs{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>Jobs</h1>
+<p class="sub">Operations started from the dashboard. They run in the background with the same lock as the daily run: if another run is in progress a job ends as "busy". Per-meter actions are on each meter's page; redraft/re-verify on drafts and leads.</p></div></header>
+<form method="post" action="/admin/jobs" class="actions"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="kind" value="run"><button type="submit" data-confirm="Start the full daily pipeline now? It takes several minutes and uses Claude quota.">Run the full pipeline now</button></form>
+<div class="scroll"><table>
+<thead><tr><th>Started</th><th>Operation</th><th>Target</th><th>By</th><th>State</th><th>Exit</th></tr></thead>
+<tbody>{% for j in rows %}
+<tr><td class="small"><a href="/admin/jobs/{{ j.job_id }}">{{ local(j.created_at) }}</a></td><td>{{ kinds.get(j.kind, (j.kind,))[0] }}</td><td class="small">{{ (j.target or '')[:8] }}</td><td class="small">{{ names.get(j.requested_by, '') }}</td><td>{{ state(j.state) }}</td><td>{{ j.exit_code if j.exit_code is not none else '' }}</td></tr>
+{% else %}<tr><td colspan="6" class="muted">No jobs yet.</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

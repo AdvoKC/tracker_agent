@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% from "_macros.html" import state %}
+{% block title %}Job{% endblock %}
+{% block content %}
+<a class="crumb" href="/admin/jobs">Jobs</a>
+<header class="page-head"><div><h1>{{ label }}</h1>
+<p class="sub">{{ state(job.state) }} · started {{ local(job.started_at) or 'queued' }}{% if job.finished_at %} · finished {{ local(job.finished_at) }}{% endif %}{% if job.exit_code is not none %} · exit {{ job.exit_code }}{% endif %}</p></div></header>
+{% if job.state in ('queued', 'running') %}<p class="muted live" data-poll="4"><span class="spinner" aria-hidden="true"></span> Still running. This page refreshes every few seconds.</p>{% endif %}
+<p class="small muted">Command: promise-monitor {{ job.argv|join(' ') }}</p>
+<pre class="out">{{ job.output or '(no output yet)' }}</pre>
+{% endblock %}

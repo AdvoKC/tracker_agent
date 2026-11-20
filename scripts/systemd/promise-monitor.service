@@ -1,0 +1,19 @@
+[Unit]
+Description=AdvoKC Promise Tracker Monitor: daily run
+Documentation=file://@REPO@/docs/RUNBOOK.md
+# Crashes that never reached the Notifier (e.g. database down) still email the admin.
+OnFailure=promise-monitor-alert.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# A user manager can't order against network-online.target: wait (max 5 min) for DNS instead,
+# which matters for the catch-up run right after boot (Persistent=true on the timer).
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do getent hosts admin.promisetracker.ng >/dev/null && exit 0; sleep 10; done; exit 0'
+ExecStart=%h/.local/bin/uv run --frozen promise-monitor run
+# exit 2 = run failed but the Notifier already emailed the admin → not a "crash".
+SuccessExitStatus=2
+TimeoutStartSec=3h
+Nice=10
+IOSchedulingClass=idle

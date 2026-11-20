@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}{{ t.name }}{% endblock %}
+{% block content %}
+<a class="crumb" href="/admin/users">Users</a>
+<header class="page-head"><div><h1>{{ t.name }}</h1>
+<p class="sub">{{ t.email }} · <span class="pill">{{ t.role }}</span> · {{ 'active' if t.active else 'disabled' }} · last sign-in {{ last_login or 'never' }}</p></div></header>
+
+<div class="grid2">
+<section class="card">
+  <h2>Current access</h2>
+  {% if t.role == 'superadmin' %}<p>Superadmins see every meter.</p>{% endif %}
+  {% if current %}
+  <table class="tight"><tbody>
+  {% for a in current %}
+  <tr><td><a href="/meters/{{ a.meter_id }}">{{ a.meter }}</a><div class="muted small">{{ a.window }}{% if a.reason %} · {{ a.reason }}{% endif %}</div></td><td><span class="pill">{{ a.kind }}</span></td>
+  <td><form method="post" action="/assignments/{{ a.id }}/revoke"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="back" value="/admin/users/{{ t.user_id }}"><button class="danger" type="submit" data-confirm="Revoke this access now?">Revoke</button></form></td></tr>
+  {% endfor %}
+  </tbody></table>
+  {% elif t.role == 'coordinator' %}<p class="muted">No meters yet. Assign some below.</p>{% endif %}
+
+  <h2>Account</h2>
+  <div class="actions">
+    {% if t.user_id != user.user_id %}
+    <form method="post" action="/admin/users/{{ t.user_id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="back" value="/admin/users/{{ t.user_id }}"><button class="ghost" type="submit"{% if t.active %} data-confirm="Disable this account? They will be signed out."{% endif %}>{{ 'Disable' if t.active else 'Enable' }}</button></form>
+    <form method="post" action="/admin/users/{{ t.user_id }}/reset"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="back" value="/admin/users/{{ t.user_id }}"><button class="ghost" type="submit" data-confirm="Reset this user's password? Their current password stops working.">Reset password</button></form>
+    <form method="post" action="/admin/users/{{ t.user_id }}/role" class="row wide"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <select name="role" aria-label="Role"><option value="coordinator" {{ 'selected' if t.role == 'coordinator' }}>coordinator</option><option value="superadmin" {{ 'selected' if t.role == 'superadmin' }}>superadmin</option></select>
+      <div class="shrink"><button class="ghost" type="submit">Change role</button></div></form>
+    {% else %}<p class="muted small">This is your own account.</p>{% endif %}
+  </div>
+</section>
+
+{% if t.role == 'coordinator' and t.active %}
+<section class="card">
+  <h2>Primary coordinator for…</h2>
+  <form method="post" action="/admin/users/{{ t.user_id }}/assign">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="checks">
+    {% for m in meters %}<label><input type="checkbox" name="meter_ids" value="{{ m.id }}" {{ 'checked' if m.id in primary_of }}> {{ m.name }}</label>{% endfor %}
+    </div>
+    <p class="muted small">Ticking a meter makes {{ t.name }} its primary coordinator (replacing any current one). Unticking removes it.</p>
+    <div class="actions"><button type="submit">Save meters</button></div>
+  </form>
+
+  <h2>Temporary cover</h2>
+  <p class="muted small">Pick a meter, then grant access for a fixed window, e.g. while its coordinator is on leave.</p>
+  {% if meters %}
+  <form method="post" action="/admin/users/{{ t.user_id }}/grant">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="gm">Meter</label>
+    <select id="gm" name="meter_id">{% for m in meters %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}</select>
+    <div class="row">
+      <div><label for="gs">From (WAT)</label><input id="gs" type="datetime-local" name="starts_at" value="{{ now_local }}" required></div>
+      <div><label for="ge">Until (WAT)</label><input id="ge" type="datetime-local" name="ends_at" required></div>
+    </div>
+    <label for="gr">Reason</label><input id="gr" type="text" name="reason" required maxlength="500" placeholder="Covering for … on leave">
+    <div class="actions"><button type="submit">Grant temporary access</button></div>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+</div>
+{% endblock %}

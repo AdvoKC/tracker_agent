@@ -11,7 +11,7 @@ from __future__ import annotations
 import glob
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from promise_monitor.config import PROJECT_ROOT
 from promise_monitor.domain.normalize import normalize_promise
 from promise_monitor.domain.qa import STATUS_LABELS, QAContext
 from promise_monitor.domain.urls import normalize_url
+from promise_monitor.house_style import eligible_example
 
 FIXTURES = PROJECT_ROOT / "tests" / "fixtures" / "api"
 
@@ -30,13 +31,47 @@ class EvalCase:
     writer_input: dict[str, Any]
     current_status: str
     old_status: str | None
+    examples: list[str] = field(default_factory=list)  # real AdvoKC updates (style only)
 
 
 def _first_line(text: str) -> str:
     return text.split(". ")[0][:140]
 
 
+def _fixture_examples(fixtures: Path) -> list[tuple[str, str]]:
+    """(promise_id, text) of real AdvoKC updates: the style corpus + the recorded fixtures."""
+    out = []
+    corpus = fixtures.parent / "house_style_examples.json"
+    if corpus.exists():
+        for e in json.loads(corpus.read_text(encoding="utf-8")).get("examples", []):
+            out.append((str(e["promise_id"]), str(e["text"])))
+    for f in sorted(glob.glob(str(fixtures / "*.json"))):
+        try:
+            data = json.loads(Path(f).read_text(encoding="utf-8")).get("data")
+        except (ValueError, AttributeError):
+            continue
+        if not isinstance(data, dict) or "updates" not in data:
+            continue
+        n = normalize_promise(ApiPromiseDetail.model_validate(data))
+        for u in n.updates:
+            text = " ".join(u.text.split())
+            if eligible_example(text):
+                out.append((n.promise_id, text))
+    return out
+
+
 def build_cases(fixtures: Path = FIXTURES) -> list[EvalCase]:
+    cases = _build_cases(fixtures)
+    pool = _fixture_examples(fixtures)
+    with_examples = []
+    for c in cases:
+        pid = c.writer_input["promise"]["promise_url"].rsplit("/", 1)[-1]
+        examples = [t for p, t in pool if p != pid][:4]
+        with_examples.append(replace(c, examples=examples))
+    return with_examples
+
+
+def _build_cases(fixtures: Path = FIXTURES) -> list[EvalCase]:
     files = [*sorted(glob.glob(str(fixtures / "p_*.json"))), str(fixtures / "promise.json")]
     cases: list[EvalCase] = []
     for i, f in enumerate(files):

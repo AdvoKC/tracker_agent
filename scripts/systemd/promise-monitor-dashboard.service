@@ -1,0 +1,13 @@
+[Unit]
+Description=AdvoKC Promise Tracker Monitor: admin dashboard (127.0.0.1:8800)
+Documentation=file://@REPO@/docs/RUNBOOK.md
+
+[Service]
+WorkingDirectory=@REPO@
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/uv run --frozen promise-monitor dashboard
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
